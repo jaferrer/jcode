@@ -89,6 +89,8 @@ pub enum WidgetKind {
     UsageLimits,
     /// Session-level KV cache hit ratio
     KvCache,
+    /// Cumulative tokens saved by graft MCP tool calls this session
+    GraftSavings,
     /// Current model name
     ModelInfo,
     /// Mermaid diagrams
@@ -112,6 +114,7 @@ impl WidgetKind {
             WidgetKind::ContextUsage => 4,
             WidgetKind::UsageLimits => 5, // Bumped up - important when near limits
             WidgetKind::KvCache => 6,
+            WidgetKind::GraftSavings => 6,
             WidgetKind::MemoryActivity => 7,
             WidgetKind::ModelInfo => 8,
             WidgetKind::Compaction => 9,
@@ -138,6 +141,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => Side::Left,
             WidgetKind::UsageLimits => Side::Left,
             WidgetKind::KvCache => Side::Left,
+            WidgetKind::GraftSavings => Side::Left,
             WidgetKind::ModelInfo => Side::Left,
             WidgetKind::Tips => Side::Left,
             WidgetKind::GitStatus => Side::Left,
@@ -159,6 +163,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => 3,
             WidgetKind::UsageLimits => 3,
             WidgetKind::KvCache => 3,
+            WidgetKind::GraftSavings => 2,
             WidgetKind::ModelInfo => 3, // Model + usage bars
             WidgetKind::Tips => 3,
             WidgetKind::GitStatus => 3,
@@ -175,6 +180,7 @@ impl WidgetKind {
             WidgetKind::ContextUsage,
             WidgetKind::UsageLimits,
             WidgetKind::KvCache,
+            WidgetKind::GraftSavings,
             WidgetKind::MemoryActivity,
             WidgetKind::ModelInfo,
             WidgetKind::Compaction,
@@ -200,6 +206,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => "ambient",
             WidgetKind::UsageLimits => "usage",
             WidgetKind::KvCache => "kv-cache",
+            WidgetKind::GraftSavings => "graft-savings",
             WidgetKind::ModelInfo => "model",
             WidgetKind::Tips => "tips",
             WidgetKind::GitStatus => "git",
@@ -432,6 +439,16 @@ pub struct CacheMissAttribution {
     pub reason: String,
 }
 
+/// Session-lifetime total of `[graft] tokens saved` footers seen from MCP
+/// tool calls. Mirrors what Claude Code's dedicated graft hook/statusline
+/// tracks; jcode has no such adapter shipped by graft, so this is computed
+/// generically from tool output (see `jcode_base::graft_savings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GraftSavingsInfo {
+    pub total_tokens: u64,
+    pub attributed_calls: u64,
+}
+
 impl CacheHitInfo {
     /// Effective total prompt tokens across the session (read denominator).
     fn effective_reported_tokens(&self) -> u64 {
@@ -646,6 +663,8 @@ pub struct InfoWidgetData {
     pub observed_context_tokens: Option<u64>,
     /// Session-level cache read ratio, when the active provider reports cache telemetry.
     pub cache_hit_info: Option<CacheHitInfo>,
+    /// Cumulative tokens saved by graft MCP tool calls this session.
+    pub graft_savings_info: Option<GraftSavingsInfo>,
     /// Conversation compaction status, shown as a compact rounded status card.
     pub compaction_info: Option<CompactionInfo>,
     /// Whether background compaction is currently in progress
@@ -773,6 +792,11 @@ impl InfoWidgetData {
                 .map(|u| u.available)
                 .unwrap_or(false),
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
+            WidgetKind::GraftSavings => self
+                .graft_savings_info
+                .as_ref()
+                .map(|g| g.attributed_calls > 0)
+                .unwrap_or(false),
             WidgetKind::ModelInfo => self.model.is_some(),
             WidgetKind::Tips => false,
             WidgetKind::GitStatus => self
@@ -1217,6 +1241,18 @@ pub(crate) fn calculate_widget_height(
             };
             1 + attribution_lines
         }
+        WidgetKind::GraftSavings => {
+            if data
+                .graft_savings_info
+                .as_ref()
+                .map(|g| g.attributed_calls > 0)
+                .unwrap_or(false)
+            {
+                2
+            } else {
+                0
+            }
+        }
         WidgetKind::ModelInfo => {
             if data.model.is_none() {
                 return 0;
@@ -1630,6 +1666,7 @@ fn render_widget_content(
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::KvCache => render_kv_cache_widget(data, inner),
+        WidgetKind::GraftSavings => render_graft_savings_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_git_widget(data, inner),
@@ -1727,6 +1764,35 @@ fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'stat
     }
 
     lines
+}
+
+fn render_graft_savings_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = data.graft_savings_info.as_ref() else {
+        return Vec::new();
+    };
+    if info.attributed_calls == 0 {
+        return Vec::new();
+    }
+
+    let mut spans = vec![Span::styled(
+        "graft: ",
+        Style::default().fg(rgb(180, 180, 190)).bold(),
+    )];
+    spans.push(Span::styled(
+        format!("~{} tok saved", compact_token_count(info.total_tokens)),
+        Style::default().fg(rgb(110, 210, 140)).bold(),
+    ));
+
+    let calls_line = Line::from(vec![Span::styled(
+        format!(
+            "{} call{} attributed",
+            info.attributed_calls,
+            if info.attributed_calls == 1 { "" } else { "s" }
+        ),
+        Style::default().fg(rgb(140, 140, 150)),
+    )]);
+
+    vec![Line::from(spans), calls_line]
 }
 
 fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {

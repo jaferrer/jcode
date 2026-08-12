@@ -98,6 +98,14 @@ impl Tool for McpTool {
         let output = output_parts.join("\n");
         let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
 
+        // graft (and any other MCP server following the same convention)
+        // appends a `[graft] tokens saved ≈ N` footer to tool output. Track
+        // it here so the GraftSavings info widget has a session-lifetime
+        // total, mirroring what Claude Code's dedicated graft hook does.
+        if !result.is_error {
+            crate::graft_savings::record_from_output(&output);
+        }
+
         if result.is_error {
             Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
         } else {
