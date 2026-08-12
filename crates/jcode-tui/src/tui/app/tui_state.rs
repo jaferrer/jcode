@@ -1531,6 +1531,14 @@ impl crate::tui::TuiState for App {
                 }
             });
 
+        let graft_savings_snapshot = crate::graft_savings::snapshot();
+        let graft_savings_info = (!graft_savings_snapshot.is_empty()).then(|| {
+            crate::tui::info_widget::GraftSavingsInfo {
+                total_tokens: graft_savings_snapshot.total_tokens,
+                attributed_calls: graft_savings_snapshot.attributed_calls,
+            }
+        });
+
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
         let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
             crate::tui::mermaid::get_active_diagrams()
@@ -1610,6 +1618,7 @@ impl crate::tui::TuiState for App {
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
             cache_hit_info,
+            graft_savings_info,
             compaction_info,
             is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
                 let compaction = self.registry.compaction();
