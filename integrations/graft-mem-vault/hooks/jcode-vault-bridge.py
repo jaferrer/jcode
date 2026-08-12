@@ -14,6 +14,12 @@ Modos:
   --observation  passthrough de escritura a claude-mem
   --track        registra el fichero tocado (se llama desde pre_tool)
   --turn-end     refresca el overlay si esta rancio (se llama desde turn_end)
+  --full-clear   pipeline completo para /vault-clear: resume la sesion que se
+                 cierra a claude-mem, reconstruye el grafo+vault del proyecto
+                 (graft build + regenerar notas) y deja el overlay fresco.
+                 No lo llama jcode automaticamente; lo dispara el propio
+                 comando /vault-clear de la TUI, on demand, antes de
+                 descartar la sesion.
 
 Rastreo de ficheros
 -------------------
@@ -523,6 +529,96 @@ def cmd_turn_summarize(session_id):
     }
     claude_mem("summarize", payload, timeout=SUMMARIZE_TIMEOUT)
 
+FULL_CLEAR_TIMEOUT = 180  # graft build + regenerar notas puede tardar ~24s/proyecto
+
+
+def _hub_project_name(cwd):
+    """Nombre del proyecto tal como lo espera refresh_vaults.py --only.
+
+    Convencion HUB+SPOKE: la sesion corre en ~/ai/HUB/<PROYECTO>[/subdir]; el
+    nombre es el primer segmento bajo HUB. Si cwd no cuelga de HUB (un spoke
+    fuera del hub, o un checkout suelto), no hay --only seguro: se devuelve
+    None y el pipeline salta el rebuild en vez de adivinar mal.
+    """
+    hubs_root = os.path.expanduser(
+        os.environ.get("GRAFT_MEM_VAULT_HUBS", "~/ai/HUB"))
+    try:
+        rel = os.path.relpath(os.path.realpath(cwd), os.path.realpath(hubs_root))
+    except Exception:
+        return None
+    if rel.startswith(".."):
+        return None
+    return rel.split(os.sep, 1)[0]
+
+
+def _run_refresh_vaults(project, scripts_dir):
+    """Ejecuta refresh_vaults.py --only <project>. Devuelve (ok, mensaje)."""
+    script = os.path.join(scripts_dir, "refresh_vaults.py")
+    if not os.path.exists(script):
+        return False, "refresh_vaults.py no encontrado (paquete no instalado)"
+    try:
+        proc = subprocess.run(
+            [sys.executable, script, "--only", project, "--no-register"],
+            capture_output=True, text=True, timeout=FULL_CLEAR_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"refresh_vaults.py agoto el timeout ({FULL_CLEAR_TIMEOUT}s)"
+    except Exception as exc:
+        return False, f"refresh_vaults.py fallo al lanzarse: {exc}"
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, "; ".join(tail[-3:]) if tail else f"exit {proc.returncode}"
+    stdout_tail = (proc.stdout or "").strip().splitlines()
+    return True, stdout_tail[-1] if stdout_tail else "ok"
+
+
+def cmd_full_clear():
+    """/vault-clear: resume la sesion, reconstruye el vault, refresca overlay.
+
+    Bloqueante por diseno (lo llama la TUI desde un tokio::spawn en segundo
+    plano, no desde un hook con timeout corto) para poder reportar cada paso.
+    Emite un JSON por linea en stdout con el resultado de cada etapa; nunca
+    lanza, cada etapa fallida se reporta y las siguientes se intentan igual
+    salvo que dependan del resultado.
+    """
+    cwd = os.environ.get("JCODE_HOOK_CWD") or os.getcwd()
+    session_id = os.environ.get("JCODE_HOOK_SESSION_ID", "jcode")
+    last_text = os.environ.get("JCODE_HOOK_LAST_ASSISTANT_TEXT", "")
+
+    steps = {}
+
+    if last_text.strip():
+        payload = {
+            "cwd": cwd,
+            "session_id": session_id,
+            "last_assistant_message": last_text,
+        }
+        raw = claude_mem("summarize", payload, timeout=SUMMARIZE_TIMEOUT)
+        steps["summarize"] = {"ok": raw is not None}
+    else:
+        steps["summarize"] = {"ok": True, "skipped": "no assistant text yet"}
+
+    project = _hub_project_name(cwd)
+    scripts_dir = os.path.join(VAULT_HOME, "scripts")
+    if project:
+        ok, msg = _run_refresh_vaults(project, scripts_dir)
+        steps["rebuild"] = {"ok": ok, "project": project, "detail": msg}
+    else:
+        steps["rebuild"] = {"ok": True, "skipped": "cwd not under a HUB project"}
+
+    write_overlay(cwd, build_overlay(
+        additional_context(run_vault_hook({
+            "cwd": cwd, "session_id": session_id, "source": "vault-clear",
+        })),
+        additional_context(claude_mem("context", {
+            "cwd": cwd, "session_id": session_id, "source": "vault-clear",
+        })),
+    ))
+    steps["overlay"] = {"ok": True}
+
+    print(json.dumps(steps))
+    return 0
+
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -534,6 +630,8 @@ def main():
         return cmd_passthrough("observation")
     if mode == "--track":
         return cmd_track()
+    if mode == "--full-clear":
+        return cmd_full_clear()
     if mode == "--turn-end":
         # turn_end es observador: cierra el turno para que la siguiente
         # herramienta vuelva a poder consultar intencion, refresca el

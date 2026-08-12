@@ -149,6 +149,13 @@ struct PendingLocalTransfer {
     receiver: mpsc::Receiver<anyhow::Result<PreparedTransferSession>>,
 }
 
+/// Outcome of the `/vault-clear` background pipeline (summarize the closing
+/// session to claude-mem, rebuild the graft-mem-vault, refresh the prompt
+/// overlay), reported back so the poller can reset the session once ready.
+struct PendingVaultClear {
+    receiver: mpsc::Receiver<crate::tui::app::commands::VaultClearOutcome>,
+}
+
 /// A reasoning trace anchored in the transcript during the current turn
 /// (`current` display mode). `wrapped_lines_at_anchor` snapshots the
 /// transcript's total wrapped-line count when the trace anchored; once the
@@ -1526,6 +1533,9 @@ pub struct App {
     pending_transfer_request: bool,
     // Local transfer preparation currently running in the background.
     pending_local_transfer: Option<PendingLocalTransfer>,
+    // /vault-clear pipeline (summarize + rebuild vault + refresh overlay)
+    // currently running in the background before the session is reset.
+    pending_vault_clear: Option<PendingVaultClear>,
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
