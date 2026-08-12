@@ -25,6 +25,14 @@ impl Agent {
         if event.is_some() {
             self.note_compaction_applied();
             self.persist_session_best_effort("compaction completion");
+            // Claude Code fires SessionStart with source "compact" after a
+            // compaction so hooks can re-inject fresh context (claude-mem
+            // rewrites the memory overlay and refreshes the vault). Mirror
+            // that here: the system prompt — rebuilt from disk every turn —
+            // picks the new overlay up on the next turn. This is the single
+            // seam where completed compactions are applied, so manual
+            // (/compact) and automatic compaction both fire it.
+            self.fire_session_lifecycle_hook("session_start", "compact");
         }
 
         event

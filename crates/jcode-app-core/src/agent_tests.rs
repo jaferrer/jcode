@@ -1860,3 +1860,90 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         "{text:?}"
     );
 }
+
+/// A completed compaction must fire `session_start` with source "compact".
+///
+/// Claude Code fires SessionStart(source=compact) after a compaction so hooks
+/// can re-inject fresh context (the graft-mem-vault bridge rewrites the memory
+/// overlay and refreshes the vault from it). `poll_compaction_completion_event`
+/// is the single seam where completed compactions are applied, so pinning it
+/// here covers both /compact and automatic compaction. Without the hook, the
+/// injected memory context goes stale after every compaction and nothing
+/// notices.
+#[tokio::test]
+async fn compaction_completion_fires_session_start_compact_hook() {
+    let _guard = crate::storage::lock_test_env();
+
+    let dir = std::env::temp_dir().join(format!("jcode-compact-hook-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("fired.log");
+    let script = dir.join("hook.sh");
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$JCODE_HOOK_SOURCE $JCODE_HOOK_SESSION_ID\" >> {}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // SAFETY: the storage test lock serializes env mutation across these tests.
+    unsafe {
+        std::env::set_var("JCODE_HOOK_SESSION_START", script.to_string_lossy().as_ref());
+    }
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("test-model"));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let session_id = agent.session.id.clone();
+
+    // Enough turns for a hard compaction to have something to drop.
+    for i in 0..14 {
+        agent
+            .session
+            .add_message(Role::User, Message::user(&format!("turn {i}")).content);
+    }
+    let provider_messages = agent.session.provider_messages().to_vec();
+    let compaction = agent.registry.compaction();
+    {
+        let mut manager = compaction.write().await;
+        manager
+            .hard_compact_with(&provider_messages)
+            .expect("hard compaction should succeed with 14 turns");
+    }
+    drop(compaction);
+
+    let event = agent.poll_compaction_completion_event();
+    assert!(event.is_some(), "a completed compaction must produce an event");
+
+    // The hook is spawned detached, so poll briefly.
+    let mut fired = String::new();
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&log)
+            && text.lines().any(|l| l.starts_with("compact "))
+        {
+            fired = text;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("JCODE_HOOK_SESSION_START");
+    }
+    crate::config::invalidate_config_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        fired.lines().any(|l| l == format!("compact {session_id}")),
+        "session_start must fire with source=compact for this session, got {fired:?}"
+    );
+}
