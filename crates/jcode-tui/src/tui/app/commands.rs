@@ -491,6 +491,164 @@ pub(super) fn poll_local_transfer_prepare(app: &mut App) -> bool {
     }
 }
 
+/// Outcome of the `/vault-clear` background pipeline. `Ok` carries the raw
+/// per-step JSON the bridge script printed (used for the confirmation
+/// message); `Err` carries a human-readable failure that stops the reset.
+pub(super) type VaultClearOutcome = Result<String, String>;
+
+fn vault_clear_bridge_path() -> Option<PathBuf> {
+    let home = std::env::var("JCODE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".jcode")))?;
+    let bridge = home
+        .join("graft-mem-vault")
+        .join("hooks")
+        .join("jcode-vault-bridge.py");
+    bridge.is_file().then_some(bridge)
+}
+
+/// `/vault-clear`: like `/clear`, but first summarizes the closing session
+/// to claude-mem, rebuilds the graft-mem-vault (graft build + notes) for the
+/// current HUB project, and refreshes `.jcode/prompt-overlay.md` — so the
+/// continuity memory these two systems provide is caught up to this session
+/// *before* its transcript is discarded, not just eventually on the next
+/// `turn_end`'s lazy refresh.
+///
+/// Runs the pipeline (which can take up to ~24s per project, per the vault's
+/// own docs) on a background task so the TUI stays responsive; the actual
+/// session reset only happens once the pipeline reports back, via
+/// `poll_vault_clear`.
+pub(super) fn handle_vault_clear_command(app: &mut App) -> bool {
+    if app.pending_vault_clear.is_some() {
+        app.push_display_message(DisplayMessage::system(
+            "A /vault-clear is already refreshing memory in the background.".to_string(),
+        ));
+        return true;
+    }
+
+    let Some(bridge) = vault_clear_bridge_path() else {
+        app.push_display_message(DisplayMessage::error(
+            "graft-mem-vault is not installed (~/.jcode/graft-mem-vault/hooks/jcode-vault-bridge.py not found).\nFalling back to a plain /clear.".to_string(),
+        ));
+        reset_current_session(app);
+        return true;
+    };
+
+    let cwd = app
+        .session
+        .working_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| ".".to_string());
+    let session_id = app.session.id.clone();
+    let last_assistant_text = app
+        .session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if !matches!(message.role, Role::Assistant) {
+                return None;
+            }
+            let text = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        })
+        .unwrap_or_default();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.pending_vault_clear = Some(super::PendingVaultClear { receiver: rx });
+    app.push_display_message(DisplayMessage::system(
+        "🔄 Refreshing continuity memory (summarize → rebuild vault → overlay) before clearing… this can take up to ~30s.".to_string(),
+    ));
+    app.set_status_notice("Refreshing memory before /clear");
+
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(&bridge);
+        command
+            .arg("--full-clear")
+            .env("JCODE_HOOK_CWD", &cwd)
+            .env("JCODE_HOOK_SESSION_ID", &session_id)
+            .env("JCODE_HOOK_STATUS", "ok")
+            .env("JCODE_HOOK_LAST_ASSISTANT_TEXT", &last_assistant_text)
+            .env("JCODE_HOOKS_DISABLED", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let result = match command.output() {
+            Ok(output) if output.status.success() => {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            }
+            Ok(output) => Err(format!(
+                "jcode-vault-bridge.py --full-clear exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Err(format!(
+                "Failed to launch jcode-vault-bridge.py --full-clear: {error}"
+            )),
+        };
+        let _ = tx.send(result);
+    });
+
+    true
+}
+
+/// Polls the `/vault-clear` background pipeline and, once it resolves,
+/// performs the actual `/clear` reset (mirrors `reset_current_session`,
+/// called by plain `/clear`). Wired into the same tick loop as
+/// `poll_local_transfer_prepare`.
+pub(super) fn poll_vault_clear(app: &mut App) -> bool {
+    let recv_result = {
+        let Some(pending) = app.pending_vault_clear.as_ref() else {
+            return false;
+        };
+        pending.receiver.try_recv()
+    };
+
+    match recv_result {
+        Ok(outcome) => {
+            app.pending_vault_clear = None;
+            match outcome {
+                Ok(steps_json) => {
+                    reset_current_session(app);
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "✅ Memory refreshed and session cleared.\n{}",
+                        steps_json
+                    )));
+                    app.set_status_notice("Memory refreshed, session cleared");
+                }
+                Err(error) => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "/vault-clear pipeline failed, session was NOT cleared (nothing lost): {}\n\nRun /clear directly if you want to discard the session anyway.",
+                        error
+                    )));
+                    app.set_status_notice("Vault-clear failed");
+                }
+            }
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.pending_vault_clear = None;
+            app.push_display_message(DisplayMessage::error(
+                "/vault-clear pipeline failed before returning a result. Session was NOT cleared.".to_string(),
+            ));
+            app.set_status_notice("Vault-clear failed");
+            true
+        }
+    }
+}
+
 pub(super) fn maybe_begin_pending_local_transfer(app: &mut App) -> bool {
     if app.is_remote || app.is_processing || !app.pending_transfer_request {
         return false;
@@ -1746,6 +1904,10 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/clear" {
         reset_current_session(app);
         return true;
+    }
+
+    if trimmed == "/vault-clear" {
+        return handle_vault_clear_command(app);
     }
 
     if trimmed == "/cls" || trimmed == "/clear-view" {
