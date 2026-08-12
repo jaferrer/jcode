@@ -200,3 +200,121 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     assert!(matches!(second, ServerEvent::Done { id: 7 }));
     Ok(())
 }
+
+/// `/clear` must fire the `session_end` hook for the session it discards.
+///
+/// External session-end consumers (memory capture, vault refresh) treat
+/// `session_end` as "this transcript is over, summarize it". `/clear` ends a
+/// transcript just as definitively as closing the app, so a `/clear` that
+/// stays silent silently drops that session's summary, and the loss is
+/// invisible: nothing errors, the memory simply never appears.
+#[tokio::test]
+async fn handle_clear_session_fires_the_session_end_hook() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+
+    let dir = std::env::temp_dir().join(format!("jcode-clear-hook-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let log = dir.join("fired.log");
+    let script = dir.join("hook.sh");
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$JCODE_HOOK_SOURCE $JCODE_HOOK_SESSION_ID\" >> {}\n",
+            log.display()
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // SAFETY: the storage test lock serializes env mutation across these tests.
+    unsafe {
+        std::env::set_var("JCODE_HOOK_SESSION_END", script.to_string_lossy().as_ref());
+    }
+    crate::config::invalidate_config_cache();
+
+    let old_session_id = "session_before_clear_hook";
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(build_test_agent_with_id(
+        provider.clone(),
+        registry.clone(),
+        old_session_id,
+        Vec::new(),
+    )));
+
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        old_session_id.to_string(),
+        Arc::clone(&agent),
+    )])));
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let file_touch = FileTouchService::new();
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+    // Drive the real `/clear` request handler, not `mark_closed` directly:
+    // the point of the test is that this path reaches the hook.
+    let mut client_session_id = old_session_id.to_string();
+    handle_clear_session(
+        11,
+        false,
+        &mut client_session_id,
+        "conn_clear_hook",
+        &agent,
+        &provider,
+        &registry,
+        &sessions,
+        &shutdown_signals,
+        &soft_interrupt_queues,
+        &client_connections,
+        &swarm_members,
+        &swarms_by_id,
+        &file_touch,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &client_event_tx,
+    )
+    .await;
+
+    // The hook is spawned detached, so poll briefly rather than assuming it
+    // has already run by the time mark_closed returns.
+    let mut fired = String::new();
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&log)
+            && !text.trim().is_empty()
+        {
+            fired = text;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("JCODE_HOOK_SESSION_END");
+    }
+    crate::config::invalidate_config_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        fired.contains(old_session_id),
+        "session_end hook must fire for the discarded session, got {fired:?}"
+    );
+    Ok(())
+}

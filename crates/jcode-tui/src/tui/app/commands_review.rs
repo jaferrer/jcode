@@ -279,9 +279,32 @@ pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
     app.diff_pane_scroll_x = 0;
 }
 
+/// Fire the `session_end` observer hook for a session that is being discarded
+/// in place (`/clear`) rather than closed with the app.
+///
+/// `Agent::mark_closed` fires this hook for normal session close, but `/clear`
+/// never reaches the agent: it closes `app.session` directly and swaps in a
+/// fresh one. Without this call, external session-end consumers (memory
+/// capture, vault refresh) silently never see a `/clear`, which looks like the
+/// hook being broken rather than a path that skips it.
+fn fire_session_end_hook(app: &App, source: &str) {
+    if !crate::hooks::hook_configured("session_end") {
+        return;
+    }
+    let mut event = crate::hooks::HookEvent::new("session_end")
+        .session_id(app.session.id.clone())
+        .field("SOURCE", source)
+        .field("MODEL", app.provider.model());
+    if let Some(cwd) = active_working_dir(app) {
+        event = event.cwd(cwd.to_string_lossy().to_string());
+    }
+    crate::hooks::dispatch_observer(event);
+}
+
 pub(super) fn reset_current_session(app: &mut App) {
     app.session.mark_closed();
     let _ = app.session.save();
+    fire_session_end_hook(app, "clear");
     app.clear_provider_messages();
     app.clear_display_messages();
     // A streaming mermaid preview (STREAMING_PREVIEW_DIAGRAM) belongs to the
