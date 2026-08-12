@@ -420,6 +420,7 @@ mod tests {
             ambient_info: None,
             observed_context_tokens: None,
             cache_hit_info: None,
+            graft_savings_info: None,
             compaction_info: None,
             is_compacting: false,
             git_info: None,
