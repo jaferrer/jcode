@@ -1,11 +1,12 @@
 use super::{
-    BackgroundInfo, CacheHitInfo, CacheMissAttribution, GraphEdge, GraphNode, InfoWidgetData,
-    Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
-    StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
-    calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
-    render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_todos_compact, render_todos_expanded, render_todos_widget, render_usage_compact,
-    render_usage_widget, swarm_plan_todos, truncate_smart,
+    BackgroundInfo, CacheHitInfo, CacheMissAttribution, GraftSavingsInfo, GraphEdge, GraphNode,
+    InfoWidgetData, Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo,
+    MemoryState, PipelineState, StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind,
+    calculate_placements, calculate_widget_height, effective_prompt_tokens,
+    occasional_status_tip, render_graft_savings_widget, render_kv_cache_widget,
+    render_memory_compact, render_memory_widget, render_model_widget, render_todos_compact,
+    render_todos_expanded, render_todos_widget, render_usage_compact, render_usage_widget,
+    swarm_plan_todos, truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -1812,4 +1813,48 @@ fn compact_page_height_matches_for_cost_based_usage() {
 
     let lines = super::render_page(InfoPageKind::CompactOnly, &data, inner);
     assert_eq!(lines.len() as u16, layout.pages[0].height);
+}
+
+#[test]
+fn graft_savings_widget_end_to_end_from_real_mcp_footer_pipeline() {
+    // Exercises the exact entry point jcode-base/mcp/tool.rs calls after
+    // every non-error MCP tool result, using realistic multi-server output
+    // blobs (mirrors what graft actually appends), through the real global
+    // accumulator, into the real render dispatcher.
+    crate::graft_savings::reset_for_tests();
+    let output_1 = "some file contents here\n\
+        [graft] tokens saved ≈ 12,345 (78%); this pack ≈ 1,234 tok vs reading the 3 file(s) whole ≈ 13,579 tok";
+    let output_2 = "another tool result\n[graft] tokens saved ≈ 890 (42%)";
+
+    crate::graft_savings::record_from_output(output_1);
+    crate::graft_savings::record_from_output(output_2);
+
+    let snap = crate::graft_savings::snapshot();
+    assert_eq!(snap.total_tokens, 12_345 + 890);
+    assert_eq!(snap.attributed_calls, 2);
+
+    let data = InfoWidgetData {
+        graft_savings_info: Some(GraftSavingsInfo {
+            total_tokens: snap.total_tokens,
+            attributed_calls: snap.attributed_calls,
+        }),
+        ..Default::default()
+    };
+
+    let lines = render_graft_savings_widget(&data, Rect::new(0, 0, 40, 3));
+    let text = lines_text(&lines);
+
+    assert_eq!(lines.len(), 2);
+    assert!(text.contains("graft:"), "text was: {text}");
+    assert!(text.contains("tok saved"), "text was: {text}");
+    assert!(text.contains("2 calls attributed"), "text was: {text}");
+
+    crate::graft_savings::reset_for_tests();
+}
+
+#[test]
+fn graft_savings_widget_hidden_when_no_data() {
+    let data = InfoWidgetData::default();
+    let lines = render_graft_savings_widget(&data, Rect::new(0, 0, 40, 3));
+    assert!(lines.is_empty());
 }
