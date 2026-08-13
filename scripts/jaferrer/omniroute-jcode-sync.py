@@ -3,13 +3,34 @@ import json, os, sys
 config_path = sys.argv[1]
 models_json = os.environ["OMNIROUTE_MODELS_JSON"]
 
+
+def toml_str(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def context_window(model):
+    """OmniRoute's advertised window for a combo.
+
+    Combos inherit the minimum context of their member models, exposed as
+    `context_length` (with `max_input_tokens` as a synonym). Without it jcode
+    falls back to DEFAULT_CONTEXT_LIMIT (200K) because it cannot classify
+    user-named combo ids, silently truncating 1M-capable routes.
+    """
+    for key in ("context_length", "max_input_tokens"):
+        value = model.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 try:
     data = json.loads(models_json)
     # owned_by=="combo" also includes OmniRoute's 38 built-in generic
     # auto/* routers (shipped with every install, not user-configured).
     # Only the slash-free ids are the named combos shown in the hub menu.
     combos = sorted(
-        m["id"] for m in data.get("data", [])
+        (m["id"], context_window(m))
+        for m in data.get("data", [])
         if m.get("owned_by") == "combo" and m.get("id") and "/" not in m["id"]
     )
 except Exception:
@@ -41,16 +62,27 @@ for i in range(start + 1, len(lines)):
         end = i
         break
 
-current_ids = sorted(
-    lines[i].split("=", 1)[1].strip().strip('"')
-    for i in range(start, end)
-    if lines[i].strip().startswith("id =")
-)
+current = []
+for i in range(start, end):
+    stripped = lines[i].strip()
+    if stripped.startswith("id ="):
+        current.append([json.loads(stripped.split("=", 1)[1].strip()), None])
+    elif stripped.startswith("context_window =") and current:
+        try:
+            current[-1][1] = int(stripped.split("=", 1)[1].strip())
+        except ValueError:
+            pass
 
-if current_ids == combos:
+if sorted(tuple(entry) for entry in current) == combos:
     sys.exit(0)
 
-block = "".join(f'[[providers.omniroute.models]]\nid = "{c}"\n\n' for c in combos)
+block = ""
+for combo_id, window in combos:
+    block += f"[[providers.omniroute.models]]\nid = {toml_str(combo_id)}\n"
+    if window:
+        block += f"context_window = {window}\n"
+    block += "\n"
+
 new_lines = lines[:start] + [block] + lines[end:]
 
 with open(config_path, "w") as f:

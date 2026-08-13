@@ -98,3 +98,53 @@ manual cada vez que el usuario da de alta/borra combos en OmniRoute:
 Verificado con los 9 combos reales tras la corrección (6 `Qoder-*-valle`
 dados de alta por el usuario + otros nombrados existentes, ninguno de los
 38 `auto/*`).
+
+## Actualización 2026-08-13: el sync ahora propaga `context_window`
+
+**Síntoma**: los combos aparecían en el picker pero la sesión reportaba
+200K de contexto aunque el modelo destino soportara 1M.
+
+**Causa**: el sync escribía solo `id = "..."`. Sin `context_window`, jcode
+no puede clasificar un id de combo nombrado por el usuario (no casa con
+ninguna familia conocida) y cae en `DEFAULT_CONTEXT_LIMIT` = 200K. El
+caché `~/.jcode/cache/omniroute_models.json` sí trae `context_length`,
+pero es best-effort: envejece y no contiene los combos recién creados.
+
+**Dónde vive el contexto en OmniRoute** (`~/.omniroute/storage.sqlite`):
+
+- `model_context_overrides` (provider, model_id, real_context, source) —
+  override manual o `auto:discovery` por modelo *subyacente*.
+- `model_capabilities.limit_context` — sincronizado desde models.dev.
+- Specs estáticos del código como último recurso.
+
+Los combos **no** se configuran directamente: su ventana se calcula como
+el **mínimo** del `contextLength` de sus modelos miembro, salvo que el
+combo traiga un `context_length` propio. Ese valor ya se expone en
+`/v1/models` por combo, así que el sync solo tiene que copiarlo.
+
+**Fix**: `scripts/jaferrer/omniroute-jcode-sync.py` lee `context_length`
+(o `max_input_tokens`) de cada combo y emite:
+
+```toml
+[[providers.omniroute.models]]
+id = "Opus5-WA"
+context_window = 1000000
+```
+
+Detalles del parche: la comparación de idempotencia ahora incluye la
+ventana, de modo que un cambio de contexto sin cambio de ids también
+dispara la reescritura; los ids se serializan con escapado TOML (varios
+combos llevan espacios, y el escapado protege comillas); un combo sin
+`context_length` se emite sin el campo, cayendo al comportamiento previo.
+
+**Verificación**: test temporal en `jcode-base` que parsea el
+`~/.jcode/config.toml` real y llama a `context_limit_for_model` (el mismo
+resolutor que usan el widget de contexto y el presupuesto de compactación)
+para cada combo. Los 18 resuelven su ventana real (1000000, 1048576 y
+262144 para `Kimi2.7-code`), ninguno cae al default. Test eliminado tras
+verificar; el mecanismo permanece cubierto por
+`populate_context_limits_from_config_ref_seeds_global_cache`.
+
+**Nota operativa**: el config se lee al arrancar. Tras un cambio de
+combos hay que relanzar jcode (la función `jcode()` del `.zshrc` corre el
+sync antes) o usar `/reload`.
