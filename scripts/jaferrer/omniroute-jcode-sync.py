@@ -23,6 +23,22 @@ def context_window(model):
     return None
 
 
+def combo_order(combo):
+    """Keep the picker grouped by the upstream provider behind each combo."""
+    name = combo[0].lower()
+    if name.startswith("copilot-"):
+        group = 0
+    elif name.endswith("-wa") or name.startswith(("fable", "opus", "sonnet")):
+        group = 1
+    elif name.startswith("kimi"):
+        group = 2
+    elif name.startswith("qoder-"):
+        group = 3
+    else:
+        group = 4
+    return group, name
+
+
 try:
     data = json.loads(models_json)
     # owned_by=="combo" also includes OmniRoute's 38 built-in generic
@@ -33,6 +49,7 @@ try:
         for m in data.get("data", [])
         if m.get("owned_by") == "combo" and m.get("id") and "/" not in m["id"]
     )
+    combos.sort(key=combo_order)
 except Exception:
     sys.exit(0)
 
@@ -73,7 +90,7 @@ for i in range(start, end):
         except ValueError:
             pass
 
-if sorted(tuple(entry) for entry in current) == combos:
+if [tuple(entry) for entry in current] == combos:
     sys.exit(0)
 
 block = ""
