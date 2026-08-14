@@ -842,6 +842,11 @@ impl Agent {
                             eprintln!("\nError: {}\n", e);
                         }
                         println!();
+                    } else {
+                        let prompt = format!("Execute the /{} skill now.", invocation.name);
+                        if let Err(e) = self.run_once(&prompt).await {
+                            eprintln!("\nError: {}\n", e);
+                        }
                     }
                     continue;
                 } else {

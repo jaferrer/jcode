@@ -3741,7 +3741,7 @@ impl App {
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
                 } else {
-                    return;
+                    input = format!("Execute the /{} skill now.", skill_name);
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a
