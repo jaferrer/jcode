@@ -13,6 +13,11 @@ Jcode already:
 - exports stable lifecycle observer hooks for `session_start`, `session_end`, `turn_start`, and `turn_end`;
 - exports `JCODE_HOOK_SESSION_ID`, `JCODE_HOOK_CWD`, event fields, and a JSON `JCODE_HOOK_PAYLOAD`;
 - resumes a native session with `jcode --resume <session-id>`.
+- renders inline images through `pane.graphics.set` when `HERDR_ENV`,
+  `HERDR_SOCKET_PATH`, and `HERDR_PANE_ID` are present. This avoids emitting Kitty APC
+  directly into the pane, because Herdr currently consumes those program-emitted APC
+  sequences without producing a placement. The API request omits an explicit placement
+  so Herdr uses the pane's current cursor position.
 
 ## Recommended first Herdr integration
 

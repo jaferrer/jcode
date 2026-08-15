@@ -8,12 +8,17 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::{
+    LazyLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
 /// Cache whether ImageMagick is available for Sixel conversion
+static NEXT_HERDR_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
 static HAS_IMAGEMAGICK: LazyLock<bool> = LazyLock::new(|| {
     Command::new("convert")
         .arg("--version")
@@ -246,7 +251,7 @@ pub fn display_image(path: &Path, params: &ImageDisplayParams) -> io::Result<boo
 #[cfg(unix)]
 fn display_herdr(
     data: &[u8],
-    params: &ImageDisplayParams,
+    _params: &ImageDisplayParams,
     img_width: u32,
     img_height: u32,
 ) -> io::Result<bool> {
@@ -258,9 +263,9 @@ fn display_herdr(
         Ok(value) if !value.is_empty() => value,
         _ => return Ok(false),
     };
-    let _ = params;
+    let request_id = NEXT_HERDR_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let request = serde_json::json!({
-        "id": format!("jcode:image:{}", std::process::id()),
+        "id": format!("jcode:image:{}:{}", std::process::id(), request_id),
         "method": "pane.graphics.set",
         "params": {
             "pane_id": pane_id,
