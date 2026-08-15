@@ -5,10 +5,13 @@
 //! Falls back to a simple placeholder if no image protocol is available.
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 /// Cache whether ImageMagick is available for Sixel conversion
 static HAS_IMAGEMAGICK: LazyLock<bool> = LazyLock::new(|| {
@@ -22,6 +25,8 @@ static HAS_IMAGEMAGICK: LazyLock<bool> = LazyLock::new(|| {
 /// Terminal image protocol support
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ImageProtocol {
+    /// Herdr pane graphics API (the multiplexer owns Kitty placement).
+    Herdr,
     /// Kitty graphics protocol (most feature-rich)
     Kitty,
     /// iTerm2 inline images
@@ -35,6 +40,16 @@ pub enum ImageProtocol {
 impl ImageProtocol {
     /// Detect the best available image protocol for the current terminal
     pub fn detect() -> Self {
+        // Herdr consumes APC graphics emitted by programs inside its panes, so
+        // use its pane API when the client exports the socket and pane ID.
+        if herdr_image_env(
+            std::env::var("HERDR_ENV").ok().as_deref(),
+            std::env::var("HERDR_SOCKET_PATH").ok().as_deref(),
+            std::env::var("HERDR_PANE_ID").ok().as_deref(),
+        ) {
+            return Self::Herdr;
+        }
+
         // Check for Kitty first (most capable)
         if std::env::var("KITTY_WINDOW_ID").is_ok() {
             return Self::Kitty;
@@ -157,6 +172,12 @@ fn is_kitty_terminal_name(value: &str) -> bool {
     value.contains("kitty") || value.contains("ghostty") || value.contains("handterm")
 }
 
+fn herdr_image_env(herdr_env: Option<&str>, socket: Option<&str>, pane: Option<&str>) -> bool {
+    matches!(herdr_env, Some("1" | "true" | "yes" | "on"))
+        && socket.is_some_and(|value| !value.is_empty())
+        && pane.is_some_and(|value| !value.is_empty())
+}
+
 /// Display parameters for terminal images
 #[derive(Debug, Clone)]
 pub struct ImageDisplayParams {
@@ -211,11 +232,66 @@ pub fn display_image(path: &Path, params: &ImageDisplayParams) -> io::Result<boo
     let (img_width, img_height) = get_image_dimensions(&data).unwrap_or((0, 0));
 
     match protocol {
+        ImageProtocol::Herdr => display_herdr(&data, params, img_width, img_height),
         ImageProtocol::Kitty => display_kitty(&data, params, img_width, img_height),
         ImageProtocol::ITerm2 => display_iterm2(&data, path, params, img_width, img_height),
         ImageProtocol::Sixel => display_sixel(path, params, img_width, img_height),
         ImageProtocol::None => Ok(false),
     }
+}
+
+/// Display through Herdr's pane API instead of emitting APC bytes into the
+/// pane. Herdr consumes program-emitted Kitty APC and currently drops the
+/// placement, while this API path is the supported integration boundary.
+#[cfg(unix)]
+fn display_herdr(
+    data: &[u8],
+    params: &ImageDisplayParams,
+    img_width: u32,
+    img_height: u32,
+) -> io::Result<bool> {
+    let socket = match std::env::var("HERDR_SOCKET_PATH") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let pane_id = match std::env::var("HERDR_PANE_ID") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let _ = params;
+    let request = serde_json::json!({
+        "id": format!("jcode:image:{}", std::process::id()),
+        "method": "pane.graphics.set",
+        "params": {
+            "pane_id": pane_id,
+            "format": "png",
+            "data_base64": BASE64.encode(data),
+            "image_width": img_width,
+            "image_height": img_height,
+        },
+    });
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+    stream.write_all(request.to_string().as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut response = String::new();
+    BufReader::new(stream).read_line(&mut response)?;
+    if response.trim_start().starts_with('{') && !response.contains("\"error\"") {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(not(unix))]
+fn display_herdr(
+    _data: &[u8],
+    _params: &ImageDisplayParams,
+    _img_width: u32,
+    _img_height: u32,
+) -> io::Result<bool> {
+    Ok(false)
 }
 
 fn can_display_to_stdout(protocol: ImageProtocol, stdout_is_terminal: bool) -> bool {
@@ -542,6 +618,21 @@ mod tests {
     fn handterm_uses_kitty_graphics_protocol() {
         assert!(is_kitty_terminal_name("handterm"));
         assert!(is_kitty_terminal_name("HandTerm"));
+    }
+
+    #[test]
+    fn herdr_requires_all_api_environment_values() {
+        assert!(herdr_image_env(
+            Some("1"),
+            Some("/tmp/herdr.sock"),
+            Some("w1:p1")
+        ));
+        assert!(!herdr_image_env(Some("1"), None, Some("w1:p1")));
+        assert!(!herdr_image_env(
+            Some("0"),
+            Some("/tmp/herdr.sock"),
+            Some("w1:p1")
+        ));
     }
 
     #[test]
