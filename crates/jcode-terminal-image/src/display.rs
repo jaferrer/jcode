@@ -56,8 +56,11 @@ impl ImageProtocol {
     /// Detect the best available image protocol for the current terminal
     pub fn detect() -> Self {
         // Herdr consumes APC graphics emitted by programs inside its panes, so
-        // use its pane API when the client exports the socket and pane ID.
+        // use its pane API when the user opts in and the client exports the
+        // socket and pane ID. Without the opt-in the in-buffer halfblocks path
+        // is used, which paints in any terminal.
         if herdr_image_env(
+            std::env::var("JCODE_HERDR_IMAGES").ok().as_deref(),
             std::env::var("HERDR_ENV").ok().as_deref(),
             std::env::var("HERDR_SOCKET_PATH").ok().as_deref(),
             std::env::var("HERDR_PANE_ID").ok().as_deref(),
@@ -187,8 +190,31 @@ fn is_kitty_terminal_name(value: &str) -> bool {
     value.contains("kitty") || value.contains("ghostty") || value.contains("handterm")
 }
 
-fn herdr_image_env(herdr_env: Option<&str>, socket: Option<&str>, pane: Option<&str>) -> bool {
-    matches!(herdr_env, Some("1" | "true" | "yes" | "on"))
+/// Whether inline images may be routed through Herdr's pane graphics API.
+///
+/// The API acknowledges every `pane.graphics.set` with `ok` even when the
+/// attached client never paints the pixels, so a failed placement is
+/// indistinguishable from a successful one on our side. Meanwhile the TUI skips
+/// its own in-buffer draw for those regions, which leaves the reserved rows
+/// blank and the image reads as a black rectangle.
+///
+/// Because the in-buffer halfblocks path renders correctly in any terminal,
+/// Herdr routing is opt-in: set `JCODE_HERDR_IMAGES=1` to use it.
+fn herdr_images_opt_in(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn herdr_image_env(
+    opt_in: Option<&str>,
+    herdr_env: Option<&str>,
+    socket: Option<&str>,
+    pane: Option<&str>,
+) -> bool {
+    herdr_images_opt_in(opt_in)
+        && matches!(herdr_env, Some("1" | "true" | "yes" | "on"))
         && socket.is_some_and(|value| !value.is_empty())
         && pane.is_some_and(|value| !value.is_empty())
 }
@@ -794,15 +820,48 @@ mod tests {
     fn herdr_requires_all_api_environment_values() {
         assert!(herdr_image_env(
             Some("1"),
+            Some("1"),
             Some("/tmp/herdr.sock"),
             Some("w1:p1")
         ));
-        assert!(!herdr_image_env(Some("1"), None, Some("w1:p1")));
         assert!(!herdr_image_env(
+            Some("1"),
+            Some("1"),
+            None,
+            Some("w1:p1")
+        ));
+        assert!(!herdr_image_env(
+            Some("1"),
             Some("0"),
             Some("/tmp/herdr.sock"),
             Some("w1:p1")
         ));
+    }
+
+    /// The Herdr graphics API acknowledges placements the attached client never
+    /// paints, and the TUI suppresses its own in-buffer draw whenever that
+    /// route is chosen, so an unacknowledged failure shows up as a black box.
+    /// Routing must therefore stay off unless the user explicitly opts in.
+    #[test]
+    fn herdr_routing_requires_explicit_opt_in() {
+        assert!(!herdr_image_env(
+            None,
+            Some("1"),
+            Some("/tmp/herdr.sock"),
+            Some("w1:p1")
+        ));
+        assert!(!herdr_image_env(
+            Some("0"),
+            Some("1"),
+            Some("/tmp/herdr.sock"),
+            Some("w1:p1")
+        ));
+        for enabled in ["1", "true", "YES", " on "] {
+            assert!(
+                herdr_images_opt_in(Some(enabled)),
+                "expected {enabled:?} to enable Herdr image routing"
+            );
+        }
     }
 
     #[test]
