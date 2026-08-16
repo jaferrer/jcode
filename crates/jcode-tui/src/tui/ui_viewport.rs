@@ -73,6 +73,10 @@ fn sync_herdr_inline_images(
     let mut all_sent = true;
     for image in &images {
         let Some((path, _, _)) = crate::tui::mermaid::get_cached_png(image.hash) else {
+            crate::logging::warn(&format!(
+                "Herdr inline sync: missing cached PNG for image {:#x}",
+                image.hash
+            ));
             all_sent = false;
             continue;
         };
@@ -84,7 +88,13 @@ fn sync_herdr_inline_images(
         };
         match jcode_terminal_image::display_herdr_image(&path, placement) {
             Ok(true) => {}
-            Ok(false) => all_sent = false,
+            Ok(false) => {
+                crate::logging::warn(&format!(
+                    "Herdr inline sync: display returned false for image {:#x}",
+                    image.hash
+                ));
+                all_sent = false;
+            }
             Err(err) => {
                 all_sent = false;
                 crate::logging::warn(&format!(

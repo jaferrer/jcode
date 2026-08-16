@@ -5,6 +5,7 @@
 //! Falls back to a simple placeholder if no image protocol is available.
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use image::ImageEncoder;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
@@ -350,9 +351,60 @@ fn send_herdr_graphics(
     placement: Option<HerdrImagePlacement>,
 ) -> io::Result<bool> {
     let request_id = NEXT_HERDR_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let request =
-        build_herdr_set_request(request_id, pane_id, data, img_width, img_height, placement);
+    let (payload, payload_width, payload_height) =
+        prepare_herdr_payload(data, img_width, img_height, placement)?;
+    let request = build_herdr_set_request(
+        request_id,
+        pane_id,
+        &payload,
+        payload_width,
+        payload_height,
+        placement,
+    );
     herdr_request(socket, request)
+}
+
+const HERDR_MAX_PAYLOAD_BYTES: usize = 900_000;
+
+fn prepare_herdr_payload(
+    data: &[u8],
+    img_width: u32,
+    img_height: u32,
+    placement: Option<HerdrImagePlacement>,
+) -> io::Result<(Vec<u8>, u32, u32)> {
+    let Some(placement) = placement else {
+        return Ok((data.to_vec(), img_width, img_height));
+    };
+    let max_width = placement.grid_cols.saturating_mul(8).max(8);
+    let max_height = placement.grid_rows.saturating_mul(16).max(16);
+    let image = image::load_from_memory(data)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let mut width = img_width;
+    let mut height = img_height;
+    let mut resized = image;
+    if width > max_width || height > max_height {
+        resized = resized.thumbnail(max_width, max_height);
+        width = resized.width();
+        height = resized.height();
+    }
+    loop {
+        let rgba = resized.to_rgba8();
+        let mut encoded = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut encoded)
+            .write_image(
+                rgba.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        if encoded.len() <= HERDR_MAX_PAYLOAD_BYTES || width <= 32 || height <= 32 {
+            return Ok((encoded, width, height));
+        }
+        width = (width as f32 * 0.8).round().max(32.0) as u32;
+        height = (height as f32 * 0.8).round().max(32.0) as u32;
+        resized = resized.resize(width, height, image::imageops::FilterType::Triangle);
+    }
 }
 
 #[cfg(not(unix))]
@@ -407,7 +459,13 @@ fn herdr_request(socket: &str, request: serde_json::Value) -> io::Result<bool> {
     stream.flush()?;
     let mut response = String::new();
     BufReader::new(stream).read_line(&mut response)?;
-    Ok(response.trim_start().starts_with('{') && !response.contains("\"error\""))
+    if response.trim_start().starts_with('{') && !response.contains("\"error\"") {
+        Ok(true)
+    } else if response.contains("\"error\"") {
+        Err(io::Error::other(response.trim().to_string()))
+    } else {
+        Ok(false)
+    }
 }
 
 /// Get image dimensions from raw data
@@ -769,6 +827,32 @@ mod tests {
         assert_eq!(request["params"]["placement"]["viewport_row"], 9);
         assert_eq!(request["params"]["placement"]["grid_cols"], 80);
         assert_eq!(request["params"]["placement"]["grid_rows"], 16);
+    }
+
+    #[test]
+    fn herdr_payload_scales_to_placement_and_size_limit() {
+        let image = image::RgbaImage::from_fn(1254, 1254, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 251) as u8, 180, 255])
+        });
+        let mut source = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut source)
+            .write_image(image.as_raw(), 1254, 1254, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let (payload, width, height) = prepare_herdr_payload(
+            &source,
+            1254,
+            1254,
+            Some(HerdrImagePlacement {
+                viewport_col: 1,
+                viewport_row: 23,
+                grid_cols: 139,
+                grid_rows: 16,
+            }),
+        )
+        .unwrap();
+        assert!(width <= 139 * 8);
+        assert!(height <= 16 * 16);
+        assert!(payload.len() <= HERDR_MAX_PAYLOAD_BYTES);
     }
 
     #[test]
