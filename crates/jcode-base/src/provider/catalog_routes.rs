@@ -215,6 +215,17 @@ struct OpenRouterRouteStats {
 /// own `append_*_routes` builder below, so provider-specific policy stays in
 /// one place per provider instead of one 400-line function.
 pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelRoute> {
+    // --omniroute forces the whole picker down to just the synced OmniRoute
+    // combos, bypassing every other provider's routes entirely (Anthropic,
+    // OpenAI, named [providers.*] profiles, Copilot, Gemini, ...).
+    if omniroute_only_mode_enabled() {
+        return crate::config::config()
+            .providers
+            .get("omniroute")
+            .map(|profile| named_provider_profile_routes("omniroute", profile))
+            .unwrap_or_default();
+    }
+
     let routes_started = std::time::Instant::now();
     provider.spawn_anthropic_catalog_refresh_if_needed();
     provider.spawn_openai_catalog_refresh_if_needed();
@@ -316,6 +327,12 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
         }
     }
     routes
+}
+
+fn omniroute_only_mode_enabled() -> bool {
+    std::env::var("JCODE_OMNIROUTE_ONLY")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 /// Anthropic models via OAuth and/or API key.

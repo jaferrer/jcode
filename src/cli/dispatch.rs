@@ -83,6 +83,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     // users; anyone re-enabling it afterwards keeps their choice.
     crate::config::Config::migrate_idle_animation_off_once();
 
+    if args.omniroute {
+        args.provider_profile = Some("omniroute".to_string());
+    }
+
     if let Some(profile_name) = args
         .provider_profile
         .as_deref()
@@ -93,6 +97,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
         args.provider = ProviderChoice::OpenaiCompatible;
+
+        if args.omniroute {
+            // JCODE_OMNIROUTE_ONLY is the authoritative kill-switch for the
+            // whole session: model_catalog_enabled() in
+            // openrouter_provider_impl.rs and multiprovider_model_routes() in
+            // catalog_routes.rs both check it, forcing every model list down
+            // to the synced combos regardless of the profile's own
+            // model_catalog=true and other configured providers.
+            crate::env::set_var("JCODE_OMNIROUTE_ONLY", "1");
+            let combo_ids: Vec<String> = crate::config::config()
+                .providers
+                .get(profile_name)
+                .map(|profile| {
+                    profile
+                        .models
+                        .iter()
+                        .map(|model| model.id.trim().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            args.model = omniroute_model_override(args.model.as_deref(), &combo_ids);
+        }
     }
 
     if let Some(tool_profile) = args.tool_profile.as_deref() {
@@ -571,6 +597,54 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Validates `--model` against `[providers.omniroute].models` (the combo IDs
+/// synced by `omniroute-jcode-sync.py`) when `--omniroute` is active. Returns
+/// `None` (falling back to the profile's `default_model`) and logs a warning
+/// when the requested model isn't a synced combo.
+fn omniroute_model_override(requested: Option<&str>, combo_ids: &[String]) -> Option<String> {
+    let requested = requested?.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    if combo_ids.iter().any(|id| id.trim() == requested) {
+        return Some(requested.to_string());
+    }
+    crate::logging::warn(&format!(
+        "--omniroute: '{requested}' is not a synced OmniRoute combo; falling back to the profile's default_model. Run the combo sync script or pick one from /model."
+    ));
+    None
+}
+
+#[cfg(test)]
+mod omniroute_flag_tests {
+    use super::omniroute_model_override;
+
+    #[test]
+    fn valid_combo_is_kept() {
+        let combos = vec!["Sonnet5-WA".to_string(), "Opus5-WA".to_string()];
+        assert_eq!(
+            omniroute_model_override(Some("Sonnet5-WA"), &combos),
+            Some("Sonnet5-WA".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_model_falls_back_to_default_model() {
+        let combos = vec!["Sonnet5-WA".to_string()];
+        assert_eq!(
+            omniroute_model_override(Some("gpt-4-made-up"), &combos),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_or_missing_request_falls_back_to_default_model() {
+        let combos = vec!["Sonnet5-WA".to_string()];
+        assert_eq!(omniroute_model_override(Some("  "), &combos), None);
+        assert_eq!(omniroute_model_override(None, &combos), None);
+    }
 }
 
 fn auth_doctor_provider_arg<'a>(

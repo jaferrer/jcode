@@ -217,7 +217,14 @@ fn provider_features_enabled(api_base: &str) -> bool {
     api_base.contains("openrouter.ai")
 }
 
-fn model_catalog_enabled() -> bool {
+fn model_catalog_enabled(default: bool) -> bool {
+    // --omniroute is an authoritative kill-switch: unlike
+    // JCODE_OPENROUTER_MODEL_CATALOG, nothing re-derives this from config,
+    // so it survives the profile-env re-application in
+    // init_provider_with_options (provider_init.rs).
+    if std::env::var("JCODE_OMNIROUTE_ONLY").as_deref() == Ok("1") {
+        return false;
+    }
     if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MODEL_CATALOG") {
         if let Some(value) = parse_env_bool(&raw) {
             return value;
@@ -227,7 +234,7 @@ fn model_catalog_enabled() -> bool {
             raw
         ));
     }
-    true
+    default
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1354,11 +1361,13 @@ impl OpenRouterProvider {
                 jcode_base::config::NamedProviderType::OpenRouter
             ) || profile.provider_routing
                 || profile.allow_provider_pinning,
-            supports_model_catalog: profile.model_catalog
-                || matches!(
-                    profile.provider_type,
-                    jcode_base::config::NamedProviderType::OpenRouter
-                ),
+            supports_model_catalog: model_catalog_enabled(
+                profile.model_catalog
+                    || matches!(
+                        profile.provider_type,
+                        jcode_base::config::NamedProviderType::OpenRouter
+                    ),
+            ),
             profile_id: Some(profile_name.to_string()),
             reasoning_effort_support: profile.supports_reasoning_effort,
             max_tokens: Self::configured_max_tokens(Some(profile_name)),
@@ -1485,7 +1494,7 @@ impl OpenRouterProvider {
         let autodetected_profile = autodetected_openai_compatible_profile();
         let api_base = configured_api_base();
         let supports_provider_features = provider_features_enabled(&api_base);
-        let supports_model_catalog = model_catalog_enabled();
+        let supports_model_catalog = model_catalog_enabled(true);
         let send_openrouter_headers = supports_provider_features;
         let auth = Self::resolve_auth()?;
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")

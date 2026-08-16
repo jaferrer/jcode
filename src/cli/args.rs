@@ -98,6 +98,14 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) provider_profile: Option<String>,
 
+    /// Restrict jcode to the OmniRoute provider profile and only its synced
+    /// combo models ([providers.omniroute] in config.toml, kept in sync by
+    /// omniroute-jcode-sync.py). Hides OmniRoute's full live model catalog
+    /// from the picker and /model for the whole session. Overrides
+    /// --provider and --provider-profile.
+    #[arg(long, global = true)]
+    pub(crate) omniroute: bool,
+
     /// Tool profile to expose to the model: full, minimal/lite, or none.
     #[arg(long, global = true)]
     pub(crate) tool_profile: Option<String>,

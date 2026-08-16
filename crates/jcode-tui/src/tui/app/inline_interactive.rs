@@ -1405,6 +1405,23 @@ impl App {
     ) -> Vec<crate::provider::ModelRoute> {
         use std::collections::BTreeMap;
 
+        // --omniroute session: every picker open funnels through here, so
+        // this is the one spot that also covers catalogs pushed by a shared
+        // remote server (whose process never saw the flag). Only OmniRoute
+        // combo routes may reach the picker.
+        let routes: Vec<crate::provider::ModelRoute> =
+            if std::env::var("JCODE_OMNIROUTE_ONLY").as_deref() == Ok("1") {
+                routes
+                    .into_iter()
+                    .filter(|route| {
+                        route.api_method == "openai-compatible:omniroute"
+                            || route.provider.eq_ignore_ascii_case("omniroute")
+                    })
+                    .collect()
+            } else {
+                routes
+            };
+
         let current_model = if self.is_remote {
             self.remote_provider_model
                 .clone()
