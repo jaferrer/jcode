@@ -17,8 +17,8 @@
 //! through `App`/session state) so the hook point in `mcp/tool.rs` stays a
 //! one-line call with no plumbing through the agent/tool trait boundary.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Total tokens saved (summed across every `[graft] tokens saved ≈ N` footer
 /// seen this process lifetime).
@@ -99,13 +99,11 @@ fn parse_footers(text: &str) -> Vec<(u64, Option<u8>)> {
             let cleaned: String = raw.chars().filter(|c| *c != ',').collect();
             if let Ok(tokens) = cleaned.parse::<u64>() {
                 let tail = &digits_str[end..];
-                let percent = tail
-                    .find('(')
-                    .and_then(|p| {
-                        let after_paren = &tail[p + 1..];
-                        let pct_end = after_paren.find('%')?;
-                        after_paren[..pct_end].trim().parse::<u8>().ok()
-                    });
+                let percent = tail.find('(').and_then(|p| {
+                    let after_paren = &tail[p + 1..];
+                    let pct_end = after_paren.find('%')?;
+                    after_paren[..pct_end].trim().parse::<u8>().ok()
+                });
                 out.push((tokens, percent));
             }
         }

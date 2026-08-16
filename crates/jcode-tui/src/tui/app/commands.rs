@@ -539,7 +539,11 @@ pub(super) fn handle_vault_clear_command(app: &mut App) -> bool {
         .session
         .working_dir
         .clone()
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_else(|| ".".to_string());
     let session_id = app.session.id.clone();
     let last_assistant_text = app
@@ -641,7 +645,8 @@ pub(super) fn poll_vault_clear(app: &mut App) -> bool {
         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
             app.pending_vault_clear = None;
             app.push_display_message(DisplayMessage::error(
-                "/vault-clear pipeline failed before returning a result. Session was NOT cleared.".to_string(),
+                "/vault-clear pipeline failed before returning a result. Session was NOT cleared."
+                    .to_string(),
             ));
             app.set_status_notice("Vault-clear failed");
             true

@@ -1895,7 +1895,10 @@ async fn compaction_completion_fires_session_start_compact_hook() {
 
     // SAFETY: the storage test lock serializes env mutation across these tests.
     unsafe {
-        std::env::set_var("JCODE_HOOK_SESSION_START", script.to_string_lossy().as_ref());
+        std::env::set_var(
+            "JCODE_HOOK_SESSION_START",
+            script.to_string_lossy().as_ref(),
+        );
     }
     crate::config::invalidate_config_cache();
 
@@ -1921,7 +1924,10 @@ async fn compaction_completion_fires_session_start_compact_hook() {
     drop(compaction);
 
     let event = agent.poll_compaction_completion_event();
-    assert!(event.is_some(), "a completed compaction must produce an event");
+    assert!(
+        event.is_some(),
+        "a completed compaction must produce an event"
+    );
 
     // The hook is spawned detached, so poll briefly.
     let mut fired = String::new();

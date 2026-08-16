@@ -1,0 +1,72 @@
+---
+session: general
+date: 2026-08-14
+status: complete
+outcome: SUCCEEDED
+---
+
+# ── STATUSLINE (REQUIRED — parsed by hooks) ──────────────────────
+goal: Verify that the /create-handoff skill runs correctly in Jcode.
+now: Resume normal work; the skill invocation path has been verified.
+test: skill_manage reload_all and /create-handoff invocation
+
+# ── MENTAL MODEL (REQUIRED) ──────────────────────────────────────
+mental_model: |
+  Jcode discovers skills from global skill directories and requires the
+  `name` field in SKILL.md frontmatter for slash registration. A bare
+  `/create-handoff` activates the skill without executing its instructions;
+  adding a prompt or sending a follow-up turn executes the active skill.
+  The handoff belongs under the current project's thoughts/shared/handoffs.
+
+# ── CODEBASE STATE (REQUIRED) ────────────────────────────────────
+codebase_state:
+  builds: true
+  tests_passing: not_run
+  test_command: skill_manage reload_all
+  pre_existing_failures: []
+  uncommitted_changes: true
+  branch: feat/jaferrer-integrations
+  dirty_files: [.gitignore]
+  warnings: This was a skill invocation smoke test.
+
+# ── WHAT WAS DONE ────────────────────────────────────────────────
+done_this_session:
+  - task: Verified /create-handoff activation and generated this handoff.
+    files: [thoughts/shared/handoffs/general/2026-08-14_09-59_create-handoff-test.yaml]
+
+# ── DECISIONS (capture WHY) ──────────────────────────────────────
+decisions:
+  - name: smoke_test_scope
+    chose: Create a minimal complete handoff for the current project.
+    over: No handoff file.
+    because: The user requested a direct activation test.
+    constraint: Do not modify source code.
+
+# ── FINDINGS (tiered by importance) ──────────────────────────────
+findings:
+  critical:
+    - The skill activated and executed successfully.
+  useful:
+    - A bare slash command only activates the skill; a prompt is needed to run it.
+  fyi:
+    - The repository already had an unrelated modification in .gitignore.
+
+# ── APPROACHES ───────────────────────────────────────────────────
+worked: [Reload the skill registry, invoke the skill, write the handoff in the project]
+
+failed: []
+
+# ── NEXT STEPS ───────────────────────────────────────────────────
+next:
+  - Continue the requested work in the jcode HUB.
+
+# ── NEXT SESSION PROMPT (REQUIRED) ───────────────────────────────
+next_session_prompt: |
+  Continue work in /Users/ferrer/ai/HUB/jcode. This handoff was created as a
+  smoke test for the Jcode /create-handoff skill. No source changes were made
+  by the test; preserve the existing unrelated .gitignore modification.
+
+# ── FILE MANIFEST ────────────────────────────────────────────────
+files:
+  created: [thoughts/shared/handoffs/general/2026-08-14_09-59_create-handoff-test.yaml]
+  modified: []
