@@ -423,6 +423,16 @@ pub fn native_image_protocol_available() -> bool {
     if let Some(enabled) = IMAGE_PROTOCOL_OVERRIDE.with(|cell| cell.get()) {
         return enabled;
     }
+    // Herdr masks the outer terminal's identity and renders panes through
+    // xterm.js. Its pane graphics API is the native image boundary in this
+    // environment, so do not degrade Mermaid content to source text merely
+    // because TERM no longer advertises Kitty/Sixel.
+    if detect_multiplexer_from_env() == Multiplexer::Herdr
+        && env_is_set(std::env::var("HERDR_SOCKET_PATH").ok().as_deref())
+        && env_is_set(std::env::var("HERDR_PANE_ID").ok().as_deref())
+    {
+        return true;
+    }
     protocol_supports_native_images(protocol_type(), VIDEO_EXPORT_MODE.load(Ordering::Relaxed))
 }
 
@@ -436,6 +446,9 @@ fn protocol_uses_text_image_fallback(
 /// Whether images are currently rendered through ratatui-image's Unicode
 /// half-block fallback instead of a native terminal image protocol.
 pub fn uses_text_image_fallback() -> bool {
+    if native_image_protocol_available() {
+        return false;
+    }
     protocol_uses_text_image_fallback(protocol_type(), VIDEO_EXPORT_MODE.load(Ordering::Relaxed))
 }
 

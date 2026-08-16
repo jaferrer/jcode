@@ -42,6 +42,15 @@ pub enum ImageProtocol {
     None,
 }
 
+/// Placement for an image in a Herdr pane viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HerdrImagePlacement {
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+}
+
 impl ImageProtocol {
     /// Detect the best available image protocol for the current terminal
     pub fn detect() -> Self {
@@ -263,30 +272,7 @@ fn display_herdr(
         Ok(value) if !value.is_empty() => value,
         _ => return Ok(false),
     };
-    let request_id = NEXT_HERDR_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let request = serde_json::json!({
-        "id": format!("jcode:image:{}:{}", std::process::id(), request_id),
-        "method": "pane.graphics.set",
-        "params": {
-            "pane_id": pane_id,
-            "format": "png",
-            "data_base64": BASE64.encode(data),
-            "image_width": img_width,
-            "image_height": img_height,
-        },
-    });
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-    stream.write_all(request.to_string().as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    let mut response = String::new();
-    BufReader::new(stream).read_line(&mut response)?;
-    if response.trim_start().starts_with('{') && !response.contains("\"error\"") {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    send_herdr_graphics(&socket, &pane_id, data, img_width, img_height, None)
 }
 
 #[cfg(not(unix))]
@@ -301,6 +287,127 @@ fn display_herdr(
 
 fn can_display_to_stdout(protocol: ImageProtocol, stdout_is_terminal: bool) -> bool {
     stdout_is_terminal && protocol.is_supported()
+}
+
+/// Send a PNG to Herdr's pane graphics API. Unlike [`display_image`], this
+/// client is intended for the TUI, where the caller owns the viewport
+/// coordinates and must not require stdout to be a TTY.
+#[cfg(unix)]
+pub fn display_herdr_image(path: &Path, placement: HerdrImagePlacement) -> io::Result<bool> {
+    let socket = match std::env::var("HERDR_SOCKET_PATH") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let pane_id = match std::env::var("HERDR_PANE_ID") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let data = std::fs::read(path)?;
+    let (width, height) = get_image_dimensions(&data).unwrap_or((0, 0));
+    if width == 0 || height == 0 {
+        return Ok(false);
+    }
+    send_herdr_graphics(&socket, &pane_id, &data, width, height, Some(placement))
+}
+
+#[cfg(not(unix))]
+pub fn display_herdr_image(_path: &Path, _placement: HerdrImagePlacement) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Clear graphics previously placed by jcode in the current Herdr pane.
+#[cfg(unix)]
+pub fn clear_herdr_images() -> io::Result<bool> {
+    let socket = match std::env::var("HERDR_SOCKET_PATH") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let pane_id = match std::env::var("HERDR_PANE_ID") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Ok(false),
+    };
+    let request_id = NEXT_HERDR_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request = serde_json::json!({
+        "id": format!("jcode:image:{}:{}", std::process::id(), request_id),
+        "method": "pane.graphics.clear",
+        "params": {"pane_id": pane_id},
+    });
+    herdr_request(&socket, request)
+}
+
+#[cfg(not(unix))]
+pub fn clear_herdr_images() -> io::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn send_herdr_graphics(
+    socket: &str,
+    pane_id: &str,
+    data: &[u8],
+    img_width: u32,
+    img_height: u32,
+    placement: Option<HerdrImagePlacement>,
+) -> io::Result<bool> {
+    let request_id = NEXT_HERDR_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request =
+        build_herdr_set_request(request_id, pane_id, data, img_width, img_height, placement);
+    herdr_request(socket, request)
+}
+
+#[cfg(not(unix))]
+fn send_herdr_graphics(
+    _socket: &str,
+    _pane_id: &str,
+    _data: &[u8],
+    _img_width: u32,
+    _img_height: u32,
+    _placement: Option<HerdrImagePlacement>,
+) -> io::Result<bool> {
+    Ok(false)
+}
+
+fn build_herdr_set_request(
+    request_id: u64,
+    pane_id: &str,
+    data: &[u8],
+    img_width: u32,
+    img_height: u32,
+    placement: Option<HerdrImagePlacement>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "pane_id": pane_id,
+        "format": "png",
+        "data_base64": BASE64.encode(data),
+        "image_width": img_width,
+        "image_height": img_height,
+    });
+    if let Some(placement) = placement {
+        params["placement"] = serde_json::json!({
+            "viewport_col": placement.viewport_col,
+            "viewport_row": placement.viewport_row,
+            "grid_cols": placement.grid_cols,
+            "grid_rows": placement.grid_rows,
+        });
+    }
+    let request = serde_json::json!({
+        "id": format!("jcode:image:{}:{}", std::process::id(), request_id),
+        "method": "pane.graphics.set",
+        "params": params,
+    });
+    request
+}
+
+#[cfg(unix)]
+fn herdr_request(socket: &str, request: serde_json::Value) -> io::Result<bool> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+    stream.write_all(request.to_string().as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut response = String::new();
+    BufReader::new(stream).read_line(&mut response)?;
+    Ok(response.trim_start().starts_with('{') && !response.contains("\"error\""))
 }
 
 /// Get image dimensions from raw data
@@ -638,6 +745,30 @@ mod tests {
             Some("/tmp/herdr.sock"),
             Some("w1:p1")
         ));
+    }
+
+    #[test]
+    fn herdr_set_request_encodes_explicit_viewport_placement() {
+        let request = build_herdr_set_request(
+            7,
+            "w1:p1",
+            b"png",
+            640,
+            480,
+            Some(HerdrImagePlacement {
+                viewport_col: 4,
+                viewport_row: 9,
+                grid_cols: 80,
+                grid_rows: 16,
+            }),
+        );
+        assert_eq!(request["method"], "pane.graphics.set");
+        assert_eq!(request["params"]["pane_id"], "w1:p1");
+        assert_eq!(request["params"]["image_width"], 640);
+        assert_eq!(request["params"]["placement"]["viewport_col"], 4);
+        assert_eq!(request["params"]["placement"]["viewport_row"], 9);
+        assert_eq!(request["params"]["placement"]["grid_cols"], 80);
+        assert_eq!(request["params"]["placement"]["grid_rows"], 16);
     }
 
     #[test]

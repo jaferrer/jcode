@@ -1,6 +1,103 @@
 use super::*;
 use std::fmt::Write as _;
+use std::sync::{LazyLock, Mutex};
 use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HerdrInlineImage {
+    hash: u64,
+    viewport_col: i32,
+    viewport_row: i32,
+    grid_cols: u32,
+    grid_rows: u32,
+}
+
+static HERDR_INLINE_IMAGES: LazyLock<Mutex<Option<Vec<HerdrInlineImage>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+fn herdr_inline_images_enabled() -> bool {
+    matches!(
+        jcode_terminal_image::ImageProtocol::detect(),
+        jcode_terminal_image::ImageProtocol::Herdr
+    )
+}
+
+fn sync_herdr_inline_images(
+    regions: &[jcode_tui_messages::ImageRegion],
+    scroll: usize,
+    visible_end: usize,
+    content_area: Rect,
+) -> bool {
+    if !herdr_inline_images_enabled() {
+        return false;
+    }
+
+    let mut images = Vec::new();
+    for region in regions {
+        if region.render != jcode_tui_messages::ImageRegionRender::Fit
+            || region.abs_line_idx < scroll
+            || region.abs_line_idx >= visible_end
+        {
+            continue;
+        }
+        let screen_y = (region.abs_line_idx - scroll) as u16;
+        let placement = HerdrInlineImage {
+            hash: region.hash,
+            viewport_col: content_area.x as i32,
+            viewport_row: content_area.y.saturating_add(screen_y) as i32,
+            grid_cols: region.width as u32,
+            grid_rows: region.height as u32,
+        };
+        if super::inline_image_ui::ensure_drawable(
+            placement.hash,
+            content_area.width,
+            placement.grid_rows as u16,
+        ) {
+            images.push(placement);
+        }
+    }
+
+    let unchanged = HERDR_INLINE_IMAGES
+        .lock()
+        .ok()
+        .and_then(|state| state.as_ref().map(|previous| previous == &images))
+        .unwrap_or(false);
+    if unchanged {
+        return true;
+    }
+
+    if let Err(err) = jcode_terminal_image::clear_herdr_images() {
+        crate::logging::warn(&format!("Failed to clear Herdr inline images: {err}"));
+    }
+
+    let mut all_sent = true;
+    for image in &images {
+        let Some((path, _, _)) = crate::tui::mermaid::get_cached_png(image.hash) else {
+            all_sent = false;
+            continue;
+        };
+        let placement = jcode_terminal_image::HerdrImagePlacement {
+            viewport_col: image.viewport_col,
+            viewport_row: image.viewport_row,
+            grid_cols: image.grid_cols,
+            grid_rows: image.grid_rows,
+        };
+        match jcode_terminal_image::display_herdr_image(&path, placement) {
+            Ok(true) => {}
+            Ok(false) => all_sent = false,
+            Err(err) => {
+                all_sent = false;
+                crate::logging::warn(&format!(
+                    "Failed to display inline image through Herdr: {err}"
+                ));
+            }
+        }
+    }
+    if let Ok(mut state) = HERDR_INLINE_IMAGES.lock() {
+        *state = all_sent.then_some(images);
+    }
+    true
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) const COPY_BADGE_ALT_LABEL: &str = "⌥";
@@ -965,6 +1062,9 @@ pub(super) fn draw_messages(
 
     frame.render_widget(Paragraph::new(visible_lines), content_area);
 
+    let herdr_inline_images =
+        sync_herdr_inline_images(&prepared.image_regions, scroll, visible_end, content_area);
+
     let centered = app.centered_mode();
     let diagram_mode = app.diagram_mode();
     let pinned_diagrams = diagram_mode == crate::config::DiagramDisplayMode::Pinned;
@@ -1019,7 +1119,9 @@ pub(super) fn draw_messages(
             // Inline raster images are prepared lazily and off-thread: only
             // the ones actually on screen get decoded/scaled, and a cold image
             // schedules background prep instead of stalling this frame.
-            let fit_ready = if is_fit && image_end > scroll && abs_idx < visible_end {
+            let fit_ready = if herdr_inline_images {
+                true
+            } else if is_fit && image_end > scroll && abs_idx < visible_end {
                 super::inline_image_ui::ensure_drawable(hash, content_area.width, total_height)
             } else {
                 true
@@ -1029,6 +1131,12 @@ pub(super) fn draw_messages(
                 if is_fit && !fit_ready {
                     // Background prep in flight; leave the blank placeholder
                     // rows this frame. A repaint is nudged on completion.
+                    continue;
+                }
+                if herdr_inline_images && is_fit {
+                    // Herdr owns the image overlay. The paragraph pass above
+                    // already painted the reserved placeholder rows, and the
+                    // socket sync placed the PNG at the matching viewport cell.
                     continue;
                 }
                 let marker_visible = abs_idx >= scroll && abs_idx < visible_end;

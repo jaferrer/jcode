@@ -12,4 +12,7 @@
 pub mod display;
 pub mod metadata;
 
-pub use display::{ImageDisplayParams, ImageProtocol, display_image};
+pub use display::{
+    HerdrImagePlacement, ImageDisplayParams, ImageProtocol, clear_herdr_images,
+    display_herdr_image, display_image,
+};
