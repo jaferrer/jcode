@@ -71,6 +71,7 @@ impl Tool for McpTool {
 
         // Convert MCP content blocks to output string
         let mut output_parts = Vec::new();
+        let mut images: Vec<(String, String)> = Vec::new();
         for block in result.content {
             match block {
                 ContentBlock::Text { text } => {
@@ -78,6 +79,7 @@ impl Tool for McpTool {
                 }
                 ContentBlock::Image { data, mime_type } => {
                     output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
+                    images.push((mime_type, data));
                 }
                 ContentBlock::Resource { resource } => {
                     if let Some(text) = resource.text {
@@ -109,7 +111,11 @@ impl Tool for McpTool {
         if result.is_error {
             Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
         } else {
-            Ok(ToolOutput::new(output).with_title(title))
+            let mut out = ToolOutput::new(output).with_title(title.clone());
+            for (media_type, data) in images {
+                out = out.with_labeled_image(media_type, data, title.clone());
+            }
+            Ok(out)
         }
     }
 }
