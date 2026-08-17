@@ -31,3 +31,10 @@ graft/
 
 # graft's local repository settings — not committed.
 /.graft/
+
+# tldr's local hook telemetry — regenerated per session.
+/.tldr/
+
+# Auto-handoffs written by the SessionEnd hook, one dir per session id.
+# The curated handoffs under thoughts/shared/handoffs/<topic>/ stay tracked.
+thoughts/shared/handoffs/*/auto-handoff-*.md
