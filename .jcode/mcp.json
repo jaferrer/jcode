@@ -1,0 +1,15 @@
+{
+  "_comment": "MCP de este repo. Con [features] lean_global = true en ~/.jcode/config.toml, jcode ignora ~/.jcode/mcp.json y los MCP de Claude Code y carga SOLO este fichero. Anade aqui lo que el repo necesite.",
+  "servers": {
+    "graft": {
+      "command": "graft",
+      "args": ["mcp"],
+      "shared": true
+    },
+    "fastedit": {
+      "command": "fastedit-mcp",
+      "args": [],
+      "shared": true
+    }
+  }
+}
