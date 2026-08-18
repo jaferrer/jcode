@@ -84,6 +84,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     crate::config::Config::migrate_idle_animation_off_once();
 
     if args.omniroute {
+        // Refresh the synced combo list first so `--omniroute` is
+        // self-sufficient even when the shell wrapper
+        // (omniroute-jcode-sync.sh) did not run before launch.
+        sync_omniroute_combos().await;
         args.provider_profile = Some("omniroute".to_string());
     }
 
@@ -617,9 +621,211 @@ fn omniroute_model_override(requested: Option<&str>, combo_ids: &[String]) -> Op
     None
 }
 
+/// Refreshes the `[[providers.omniroute.models]]` block in config.toml from
+/// OmniRoute's live combo list (same rules as `omniroute-jcode-sync.py`):
+/// `owned_by == "combo"`, slash-free ids, picker grouped by upstream provider.
+/// Best-effort: any failure is logged and startup continues with the combos
+/// already present in config.toml.
+async fn sync_omniroute_combos() {
+    match sync_omniroute_combos_inner().await {
+        Ok(true) => {
+            crate::logging::info("--omniroute: synced combo list from OmniRoute into config.toml")
+        }
+        Ok(false) => {}
+        Err(err) => crate::logging::info(&format!(
+            "--omniroute: combo sync skipped ({err:#}); using combos already in config.toml"
+        )),
+    }
+}
+
+async fn sync_omniroute_combos_inner() -> Result<bool> {
+    use anyhow::Context;
+
+    let config_path = crate::config::Config::path().context("no config.toml path")?;
+    let content = std::fs::read_to_string(&config_path)?;
+    if !content.lines().any(|l| l.trim() == "[providers.omniroute]") {
+        return Ok(false);
+    }
+
+    // The profile's own base_url is the source of truth jcode will actually
+    // talk to; OMNIROUTE_BASE_URL and localhost:20128 are fallbacks matching
+    // the shell script.
+    let base_url = crate::config::config()
+        .providers
+        .get("omniroute")
+        .map(|profile| profile.base_url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            std::env::var("OMNIROUTE_BASE_URL")
+                .ok()
+                .map(|url| url.trim().trim_end_matches('/').to_string())
+        })
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| "http://localhost:20128".to_string());
+    let url = if base_url.ends_with("/v1") {
+        format!("{base_url}/models")
+    } else {
+        format!("{base_url}/v1/models")
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let json: serde_json::Value = client.get(&url).send().await?.json().await?;
+    let combos = parse_omniroute_combos(&json);
+
+    let Some(new_content) = rewrite_omniroute_models_block(&content, &combos) else {
+        return Ok(false);
+    };
+    std::fs::write(&config_path, new_content)?;
+    crate::config::invalidate_config_cache();
+    Ok(true)
+}
+
+/// Picker grouping for combos, ported from `omniroute-jcode-sync.py`:
+/// copilot-* first, then *-wa / fable / opus / sonnet, kimi, qoder-, rest.
+fn combo_sort_key(id: &str) -> (u8, String) {
+    let name = id.to_lowercase();
+    let group = if name.starts_with("copilot-") {
+        0
+    } else if name.ends_with("-wa")
+        || name.starts_with("fable")
+        || name.starts_with("opus")
+        || name.starts_with("sonnet")
+    {
+        1
+    } else if name.starts_with("kimi") {
+        2
+    } else if name.starts_with("qoder-") {
+        3
+    } else {
+        4
+    };
+    (group, name)
+}
+
+/// Extracts named combos from a `/v1/models` payload: `owned_by == "combo"`
+/// and slash-free ids (slash ids are OmniRoute's built-in generic `auto/*`
+/// routers, not user-configured combos). The advertised context window comes
+/// from `context_length` or `max_input_tokens`.
+fn parse_omniroute_combos(json: &serde_json::Value) -> Vec<(String, Option<usize>)> {
+    let mut combos: Vec<(String, Option<usize>)> = json
+        .get("data")
+        .and_then(|data| data.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    if model.get("owned_by").and_then(|v| v.as_str()) != Some("combo") {
+                        return None;
+                    }
+                    let id = model.get("id").and_then(|v| v.as_str())?.trim().to_string();
+                    if id.is_empty() || id.contains('/') {
+                        return None;
+                    }
+                    let window = ["context_length", "max_input_tokens"]
+                        .iter()
+                        .find_map(|key| {
+                            model
+                                .get(key)
+                                .and_then(|v| v.as_u64())
+                                .filter(|n| *n > 0)
+                                .map(|n| n as usize)
+                        });
+                    Some((id, window))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    combos.sort_by(|a, b| combo_sort_key(&a.0).cmp(&combo_sort_key(&b.0)));
+    combos
+}
+
+fn toml_basic_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Replaces the `[[providers.omniroute.models]]` block of the omniroute
+/// provider section with `combos`. Returns `None` when the section is
+/// missing, `combos` is empty, or the block already matches (no write, so the
+/// config fingerprint stays untouched).
+fn rewrite_omniroute_models_block(
+    content: &str,
+    combos: &[(String, Option<usize>)],
+) -> Option<String> {
+    if combos.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = content.split('\n').collect();
+
+    let mut start = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "[[providers.omniroute.models]]" {
+            for j in (0..=i).rev() {
+                if lines[j].starts_with("[providers.") {
+                    if lines[j].trim() == "[providers.omniroute]" {
+                        start = Some(i);
+                    }
+                    break;
+                }
+            }
+            if start.is_some() {
+                break;
+            }
+        }
+    }
+    let start = start?;
+
+    let mut end = lines.len();
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        if line.starts_with('[') && line.trim() != "[[providers.omniroute.models]]" {
+            end = i;
+            break;
+        }
+    }
+
+    let mut current: Vec<(String, Option<usize>)> = Vec::new();
+    for line in &lines[start..end] {
+        let stripped = line.trim();
+        if let Some(rest) = stripped.strip_prefix("id =") {
+            if let Ok(id) = serde_json::from_str::<String>(rest.trim()) {
+                current.push((id, None));
+            }
+        } else if let Some(rest) = stripped.strip_prefix("context_window =") {
+            if let Some(last) = current.last_mut() {
+                if let Ok(window) = rest.trim().parse::<usize>() {
+                    last.1 = Some(window);
+                }
+            }
+        }
+    }
+    if current == combos {
+        return None;
+    }
+
+    let mut block: Vec<String> = Vec::new();
+    for (id, window) in combos {
+        block.push("[[providers.omniroute.models]]".to_string());
+        block.push(format!("id = {}", toml_basic_string(id)));
+        if let Some(window) = window {
+            block.push(format!("context_window = {window}"));
+        }
+        block.push(String::new());
+    }
+
+    let mut new_lines: Vec<String> = Vec::with_capacity(lines.len() + block.len());
+    new_lines.extend(lines[..start].iter().map(|line| line.to_string()));
+    new_lines.extend(block);
+    new_lines.extend(lines[end..].iter().map(|line| line.to_string()));
+    Some(new_lines.join("\n"))
+}
+
 #[cfg(test)]
 mod omniroute_flag_tests {
-    use super::omniroute_model_override;
+    use super::{
+        omniroute_model_override, parse_omniroute_combos, rewrite_omniroute_models_block,
+    };
 
     #[test]
     fn valid_combo_is_kept() {
@@ -644,6 +850,56 @@ mod omniroute_flag_tests {
         let combos = vec!["Sonnet5-WA".to_string()];
         assert_eq!(omniroute_model_override(Some("  "), &combos), None);
         assert_eq!(omniroute_model_override(None, &combos), None);
+    }
+
+    #[test]
+    fn parse_combos_filters_named_combos_only() {
+        let json = serde_json::json!({
+            "data": [
+                {"id": "auto/best-coding", "owned_by": "combo"},
+                {"id": "Fable5-WA", "owned_by": "combo", "context_length": 1000000},
+                {"id": "kimi-k2", "owned_by": "combo", "max_input_tokens": 256000},
+                {"id": "gpt-5.5", "owned_by": "openai"},
+                {"id": "qoder-plus", "owned_by": "combo"},
+                {"id": "copilot-claude", "owned_by": "combo"}
+            ]
+        });
+        let combos = parse_omniroute_combos(&json);
+        assert_eq!(
+            combos,
+            vec![
+                ("copilot-claude".to_string(), None),
+                ("Fable5-WA".to_string(), Some(1000000)),
+                ("kimi-k2".to_string(), Some(256000)),
+                ("qoder-plus".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_replaces_block_and_preserves_rest() {
+        let content = "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n\n[[providers.omniroute.models]]\nid = \"Old-WA\"\n\n[providers.other]\nbase_url = \"http://x\"\n";
+        let combos = vec![("Fable5-WA".to_string(), Some(1000000))];
+        let out = rewrite_omniroute_models_block(content, &combos).unwrap();
+        assert_eq!(
+            out,
+            "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n\n[[providers.omniroute.models]]\nid = \"Fable5-WA\"\ncontext_window = 1000000\n\n[providers.other]\nbase_url = \"http://x\"\n"
+        );
+    }
+
+    #[test]
+    fn rewrite_is_noop_when_unchanged() {
+        let content = "[providers.omniroute]\n\n[[providers.omniroute.models]]\nid = \"Fable5-WA\"\ncontext_window = 1000000\n\n";
+        let combos = vec![("Fable5-WA".to_string(), Some(1000000))];
+        assert_eq!(rewrite_omniroute_models_block(content, &combos), None);
+    }
+
+    #[test]
+    fn rewrite_returns_none_without_omniroute_section() {
+        let content = "[providers.other]\nbase_url = \"http://x\"\n";
+        let combos = vec![("Fable5-WA".to_string(), None)];
+        assert_eq!(rewrite_omniroute_models_block(content, &combos), None);
+        assert_eq!(rewrite_omniroute_models_block(content, &[]), None);
     }
 }
 
