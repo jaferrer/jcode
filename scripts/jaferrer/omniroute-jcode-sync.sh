@@ -2,6 +2,11 @@
 # Refreshes [[providers.omniroute.models]] in jcode's config.toml with
 # OmniRoute's current combo list (owned_by == "combo"). Silent, fast,
 # never blocks jcode startup on failure.
+#
+# Nota: desde agosto 2026 el flag `jcode --omniroute` ya hace este sync
+# internamente al arrancar (src/cli/dispatch.rs::sync_omniroute_combos).
+# Este wrapper sigue siendo útil para lanzamientos de jcode SIN --omniroute
+# (mantiene config.toml fresca para --provider-profile omniroute y /model).
 set -uo pipefail
 
 CONFIG="$HOME/.jcode/config.toml"
