@@ -1405,23 +1405,45 @@ impl App {
     ) -> Vec<crate::provider::ModelRoute> {
         use std::collections::BTreeMap;
 
-        // --omniroute session: every picker open funnels through here, so
-        // this is the one spot that also covers catalogs pushed by a shared
-        // remote server (whose process never saw the flag). Only OmniRoute
-        // combo routes may reach the picker.
-        let routes: Vec<crate::provider::ModelRoute> =
-            if std::env::var("JCODE_OMNIROUTE_ONLY").as_deref() == Ok("1") {
-                routes
-                    .into_iter()
-                    .filter(|route| {
-                        route.api_method == "openai-compatible:omniroute"
-                            || route.provider.eq_ignore_ascii_case("omniroute")
-                    })
-                    .collect()
-            } else {
-                routes
-            };
-
+// --omniroute session: every picker open funnels through here,
+    // one spot covers catalogs pushed shared
+    // remote server (whose process never saw the flag). Only OmniRoute
+    // combo routes reach picker.
+    let routes: Vec<crate::provider::ModelRoute> =
+        if std::env::var("JCODE_OMNIROUTE_ONLY").as_deref() == Ok("1") {
+            // The live catalog from OmniRoute also carries
+            // provider == "omniroute", so filtering by provider alone lets
+            // all 290+ catalog models through. Restrict to the synced combo
+            // IDs from [providers.omniroute].models in config.toml (plus the
+            // profile's default_model) to show only combos.
+            let combo_ids: std::collections::HashSet<String> = crate::config::config()
+                .providers
+                .get("omniroute")
+                .map(|profile| {
+                    let mut ids: Vec<String> = profile
+                        .models
+                        .iter()
+                        .map(|m| m.id.trim().to_string())
+                        .filter(|id| !id.is_empty())
+                        .collect();
+                    if let Some(default) = profile.default_model.as_deref() {
+                        let default = default.trim();
+                        if !default.is_empty() {
+                            ids.push(default.to_string());
+                        }
+                    }
+                    ids
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            routes
+                .into_iter()
+                .filter(|route| combo_ids.contains(&route.model))
+                .collect()
+        } else {
+            routes
+        };
         let current_model = if self.is_remote {
             self.remote_provider_model
                 .clone()
