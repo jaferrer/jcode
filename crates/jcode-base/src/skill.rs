@@ -231,6 +231,13 @@ impl SkillRegistry {
     /// resolved from the active session's workspace root (issue #457), never
     /// from the daemon's startup cwd, and never shared across sessions.
     pub fn load_global() -> Result<Self> {
+        // In lean-global mode, skip every global skill source. Project-local
+        // skills are still resolved per session via load_project_overlay /
+        // effective_for_working_dir.
+        if crate::config::lean_global_enabled() {
+            return Ok(Self::default());
+        }
+
         // First-run import from Claude Code / Codex CLI
         Self::import_from_external();
 
@@ -596,6 +603,10 @@ impl SkillRegistry {
             "reloaded all skills; the skills list in the system prompt may have changed",
         );
         self.skills.clear();
+
+        if crate::config::lean_global_enabled() {
+            return Ok(0);
+        }
 
         let mut count = 0;
 
@@ -1472,5 +1483,51 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("does-not-exist");
         assert!(SkillRegistry::plugin_skill_dirs_under(&missing).is_empty());
+    }
+
+    #[test]
+    fn lean_global_skips_global_skills_but_keeps_project_locals() {
+        let _env_guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("JCODE_LEAN_GLOBAL", "1");
+        crate::config::Config::invalidate_cache();
+
+        // Global skill that must be ignored in lean-global mode.
+        let global_skill = temp.path().join("skills").join("global-only");
+        std::fs::create_dir_all(&global_skill).unwrap();
+        std::fs::write(
+            global_skill.join("SKILL.md"),
+            "---\nname: global-only\ndescription: should not load\n---\n\nnope.\n",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_global().expect("load global");
+        assert!(
+            !registry.contains("global-only"),
+            "lean-global must skip global skills"
+        );
+
+        // Project-local skill must still resolve.
+        let project = tempfile::tempdir().expect("project tempdir");
+        let local_skill = project
+            .path()
+            .join(".jcode")
+            .join("skills")
+            .join("local-only");
+        std::fs::create_dir_all(&local_skill).unwrap();
+        std::fs::write(
+            local_skill.join("SKILL.md"),
+            "---\nname: local-only\ndescription: should load\n---\n\nyes.\n",
+        )
+        .unwrap();
+        let effective = SkillRegistry::effective_for_working_dir(&registry, Some(project.path()));
+        assert!(
+            effective.contains("local-only"),
+            "lean-global must keep project-local skills"
+        );
+
+        crate::env::remove_var("JCODE_LEAN_GLOBAL");
+        crate::config::Config::invalidate_cache();
     }
 }

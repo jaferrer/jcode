@@ -1098,6 +1098,13 @@ pub struct FeatureConfig {
     /// that something in the harness silently invalidated the prefix cache
     /// (default: true).
     pub kv_cache_miss_notices: bool,
+    /// Skip global skill and MCP sources. When enabled, jcode loads skills and
+    /// MCP servers only from the current project directory (./.jcode/skills,
+    /// ./.jcode/mcp.json, etc.) and ignores Claude Code plugins, ~/.jcode/skills,
+    /// ~/.agents/skills, ~/.jcode/mcp.json, and live Claude Code MCP config.
+    /// Useful for reducing context bloat when every project brings its own tools.
+    #[serde(default)]
+    pub lean_global: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
 }
@@ -1113,6 +1120,7 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
+            lean_global: false,
             update_channel: UpdateChannel::default(),
         }
     }

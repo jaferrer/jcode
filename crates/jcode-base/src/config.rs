@@ -106,6 +106,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_JADE_RELAY_TOKEN_ID",
     "JCODE_JADE_RELAY_USER_ID",
     "JCODE_KV_CACHE_MISS_NOTICES",
+    "JCODE_LEAN_GLOBAL",
     "JCODE_LATEX_RENDERING",
     "JCODE_MARKDOWN_SPACING",
     "JCODE_MEMORY_EMBEDDING_BACKEND",
@@ -312,6 +313,26 @@ pub fn config() -> &'static Config {
     }
 
     config
+}
+
+/// Returns true when lean-global mode is enabled.
+///
+/// In this mode jcode skips global skill and MCP sources (Claude Code plugins,
+/// ~/.jcode/skills, ~/.agents/skills, ~/.jcode/mcp.json, and live Claude Code
+/// MCP config) and loads only project-local resources:
+/// ./.jcode/skills/, ./.jcode/mcp.json, ./.mcp.json, and ./.claude/mcp.json.
+///
+/// The `JCODE_LEAN_GLOBAL` environment variable overrides the
+/// `[features] lean_global` config file value.
+pub fn lean_global_enabled() -> bool {
+    if let Ok(v) = std::env::var("JCODE_LEAN_GLOBAL") {
+        match v.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    config().features.lean_global
 }
 
 fn describe_config_reload(

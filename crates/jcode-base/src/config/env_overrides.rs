@@ -329,6 +329,11 @@ impl Config {
                 self.features.check_updates = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_LEAN_GLOBAL") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.lean_global = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_AUTO_POKE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.auto_poke = parsed;

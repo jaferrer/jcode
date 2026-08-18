@@ -398,6 +398,12 @@ impl McpConfig {
     /// servers survive in jcode's snapshot and would duplicate inline secrets.
     /// This only runs while ~/.jcode/mcp.json does not exist.
     fn import_from_codex_once() {
+        // Lean-global mode never imports global MCP state; project-local files
+        // are loaded directly by load_project_locals.
+        if crate::config::lean_global_enabled() {
+            return;
+        }
+
         let jcode_mcp = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("mcp.json"),
             Err(_) => return,
@@ -608,51 +614,58 @@ impl McpConfig {
 
         let mut merged = Self::default();
         let claude_mcp_enabled = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP").is_none();
+        let lean_global = crate::config::lean_global_enabled();
 
-        // Load jcode's own global config (~/.jcode/mcp.json)
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let jcode_mcp = jcode_dir.join("mcp.json");
-            if jcode_mcp.exists() {
-                if let Ok(config) = Self::load_from_file(&jcode_mcp) {
-                    merged.servers.extend(config.servers);
+        if lean_global {
+            crate::logging::info(
+                "MCP: lean-global mode enabled; skipping ~/.jcode/mcp.json and Claude Code sources",
+            );
+        } else {
+            // Load jcode's own global config (~/.jcode/mcp.json)
+            if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+                let jcode_mcp = jcode_dir.join("mcp.json");
+                if jcode_mcp.exists() {
+                    if let Ok(config) = Self::load_from_file(&jcode_mcp) {
+                        merged.servers.extend(config.servers);
+                    }
                 }
             }
-        }
 
-        // Claude Code user/global config (~/.claude.json): top-level mcpServers
-        // plus per-project entries for the project directory.
-        if claude_mcp_enabled
-            && let Ok(claude_json) = crate::storage::user_home_path(".claude.json")
-        {
-            if claude_json.exists() {
-                let cwd = project_dir.map(std::path::Path::to_path_buf);
-                let config = Self::load_claude_json(&claude_json, cwd.as_deref());
-                if !config.servers.is_empty() {
-                    crate::logging::info(&Self::live_claude_log_message(
-                        config.servers.len(),
-                        "~/.claude.json",
-                    ));
-                }
-                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
-            }
-        }
-
-        // Older Claude Code global config is also a live source. Reading it on
-        // every load preserves compatibility without copying any inline env
-        // values into ~/.jcode/mcp.json.
-        if claude_mcp_enabled
-            && let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json")
-        {
-            if claude_mcp.exists()
-                && let Ok(config) = Self::load_from_file(&claude_mcp)
+            // Claude Code user/global config (~/.claude.json): top-level mcpServers
+            // plus per-project entries for the project directory.
+            if claude_mcp_enabled
+                && let Ok(claude_json) = crate::storage::user_home_path(".claude.json")
             {
-                if !config.servers.is_empty() {
-                    crate::logging::info(&Self::live_claude_log_message(
-                        config.servers.len(),
-                        "~/.claude/mcp.json (legacy)",
-                    ));
+                if claude_json.exists() {
+                    let cwd = project_dir.map(std::path::Path::to_path_buf);
+                    let config = Self::load_claude_json(&claude_json, cwd.as_deref());
+                    if !config.servers.is_empty() {
+                        crate::logging::info(&Self::live_claude_log_message(
+                            config.servers.len(),
+                            "~/.claude.json",
+                        ));
+                    }
+                    Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
                 }
-                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+            }
+
+            // Older Claude Code global config is also a live source. Reading it on
+            // every load preserves compatibility without copying any inline env
+            // values into ~/.jcode/mcp.json.
+            if claude_mcp_enabled
+                && let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json")
+            {
+                if claude_mcp.exists()
+                    && let Ok(config) = Self::load_from_file(&claude_mcp)
+                {
+                    if !config.servers.is_empty() {
+                        crate::logging::info(&Self::live_claude_log_message(
+                            config.servers.len(),
+                            "~/.claude/mcp.json (legacy)",
+                        ));
+                    }
+                    Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+                }
             }
         }
 
