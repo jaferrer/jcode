@@ -291,7 +291,8 @@ persist_memory_injections = false
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
 kv_cache_miss_notices = true
-# Update channel: "stable" (releases only) or "main" (latest commits on push)
+# Reduce context bloat by skipping global skills and MCP sources while keeping project-local ones
+lean_global = false
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
 
