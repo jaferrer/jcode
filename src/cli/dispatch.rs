@@ -747,9 +747,10 @@ fn toml_basic_string(value: &str) -> String {
 }
 
 /// Replaces the `[[providers.omniroute.models]]` block of the omniroute
-/// provider section with `combos`. Returns `None` when the section is
-/// missing, `combos` is empty, or the block already matches (no write, so the
-/// config fingerprint stays untouched).
+/// provider section with `combos`, inserting the block at the end of the
+/// section when it has none yet. Returns `None` when the section itself is
+/// missing, `combos` is empty, or the block already matches (no write, so
+/// the config fingerprint stays untouched).
 fn rewrite_omniroute_models_block(
     content: &str,
     combos: &[(String, Option<usize>)],
@@ -775,15 +776,35 @@ fn rewrite_omniroute_models_block(
             }
         }
     }
-    let start = start?;
 
-    let mut end = lines.len();
-    for (i, line) in lines.iter().enumerate().skip(start + 1) {
-        if line.starts_with('[') && line.trim() != "[[providers.omniroute.models]]" {
-            end = i;
-            break;
+    // Replace the existing models block, or insert one at the end of the
+    // [providers.omniroute] section when it has none yet (fresh configs).
+    let (start, end, leading_blank) = match start {
+        Some(start) => {
+            let mut end = lines.len();
+            for (i, line) in lines.iter().enumerate().skip(start + 1) {
+                if line.starts_with('[') && line.trim() != "[[providers.omniroute.models]]" {
+                    end = i;
+                    break;
+                }
+            }
+            (start, end, false)
         }
-    }
+        None => {
+            let section = lines
+                .iter()
+                .position(|line| line.trim() == "[providers.omniroute]")?;
+            let mut insert = lines.len();
+            for (i, line) in lines.iter().enumerate().skip(section + 1) {
+                if line.starts_with('[') {
+                    insert = i;
+                    break;
+                }
+            }
+            let needs_blank = insert > 0 && !lines[insert - 1].trim().is_empty();
+            (insert, insert, needs_blank)
+        }
+    };
 
     let mut current: Vec<(String, Option<usize>)> = Vec::new();
     for line in &lines[start..end] {
@@ -805,6 +826,9 @@ fn rewrite_omniroute_models_block(
     }
 
     let mut block: Vec<String> = Vec::new();
+    if leading_blank {
+        block.push(String::new());
+    }
     for (id, window) in combos {
         block.push("[[providers.omniroute.models]]".to_string());
         block.push(format!("id = {}", toml_basic_string(id)));
@@ -900,6 +924,28 @@ mod omniroute_flag_tests {
         let combos = vec![("Fable5-WA".to_string(), None)];
         assert_eq!(rewrite_omniroute_models_block(content, &combos), None);
         assert_eq!(rewrite_omniroute_models_block(content, &[]), None);
+    }
+
+    #[test]
+    fn rewrite_inserts_block_when_section_has_none() {
+        let content = "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n\n[providers.other]\nbase_url = \"http://x\"\n";
+        let combos = vec![("Fable5-WA".to_string(), Some(1000000))];
+        let out = rewrite_omniroute_models_block(content, &combos).unwrap();
+        assert_eq!(
+            out,
+            "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n\n[[providers.omniroute.models]]\nid = \"Fable5-WA\"\ncontext_window = 1000000\n\n[providers.other]\nbase_url = \"http://x\"\n"
+        );
+    }
+
+    #[test]
+    fn rewrite_inserts_block_at_eof() {
+        let content = "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n";
+        let combos = vec![("Fable5-WA".to_string(), None)];
+        let out = rewrite_omniroute_models_block(content, &combos).unwrap();
+        assert_eq!(
+            out,
+            "[providers.omniroute]\nbase_url = \"http://localhost:20128/v1\"\n\n[[providers.omniroute.models]]\nid = \"Fable5-WA\"\n"
+        );
     }
 }
 
